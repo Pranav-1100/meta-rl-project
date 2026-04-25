@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# uv / venv
+.venv/
+.uv/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Env vars
+.env
+.env.local
+.env.*.local
+
+# Training artifacts
+wandb/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+
+# Data (keep schemas, exclude bulk)
+data/trajectories/*.jsonl
+data/eval/*.jsonl
+!data/trajectories/.gitkeep
+!data/eval/.gitkeep
+
+# Hackathon PDFs (reference material, not committed)
+*.pdf

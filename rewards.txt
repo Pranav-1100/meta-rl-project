@@ -1,0 +1,934 @@
+"""
+PhonePilot Reward Function
+===========================
+
+Five-component reward function for the PhonePilot OpenEnv environment.
+Implements sub-goal decomposed task rewards + anti-hacking guards as specified
+in the PRD v1.5 Section 6.
+
+Components (each computed independently and summed into a single scalar):
+  1. Goal achievement (dense sub-goal scoring)   -- main positive signal
+  2. Truthfulness penalty                         -- critical anti-hack
+  3. Efficiency cost                              -- small negative per action
+  4. Appropriateness penalty                      -- spam / time / channel
+  5. Format validity penalty                      -- malformed tool calls
+
+The reward calculator is STATEFUL (holds per-episode context). It exposes:
+
+    calc = RewardCalculator(task=current_task, episode_start_time_min=14*60)
+    # called once per env.step():
+    breakdown = calc.step_reward(
+        action_record, episode_context, parse_error=None
+    )
+    # and once when agent calls end_task() or episode times out:
+    breakdown = calc.episode_end_reward(episode_context, end_task_action)
+
+Each call returns a RewardBreakdown with `total` (scalar for GRPO) plus
+per-component values for logging.
+
+Author: Team LAKERS
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import re
+
+
+# ============================================================================
+# 1. Type definitions
+# ============================================================================
+
+class Channel(str, Enum):
+    CALL = "call"
+    WHATSAPP_CALL = "whatsapp_call"
+    WHATSAPP_MSG = "whatsapp_message"
+    SMS = "sms"
+    EMAIL = "email"
+
+
+# "Voice" channels require synchronous answer; "text" channels are async.
+VOICE_CHANNELS: Set[Channel] = {Channel.CALL, Channel.WHATSAPP_CALL}
+TEXT_CHANNELS: Set[Channel] = {Channel.WHATSAPP_MSG, Channel.SMS, Channel.EMAIL}
+
+# Typical async reply windows (minutes) used by the escalation-too-fast check.
+TYPICAL_REPLY_WINDOW_MIN: Dict[Channel, int] = {
+    Channel.WHATSAPP_MSG: 10,
+    Channel.SMS: 30,
+    Channel.EMAIL: 120,
+}
+
+
+class TaskTier(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+    COMPLEX = "complex"
+
+
+class UrgencyLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass
+class ActionRecord:
+    """One entry in the episode action log."""
+    simulated_time_min: int          # minutes since the simulated day started (0 = midnight)
+    tool_name: str                   # e.g. "send_whatsapp"
+    arguments: Dict[str, Any]        # parsed tool arguments
+    outcome: str                     # "success", "no_answer", "delivered", "failed", ...
+    outcome_details: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ContactState:
+    """Per-contact state that reward logic cares about."""
+    name: str
+    unanswered_msgs_from_agent: int = 0         # increments on send, resets on their reply
+    last_action_by_agent_min: Optional[int] = None
+    last_channel_attempted: Optional[Channel] = None
+    has_responded_this_episode: bool = False
+    confirmed_plan_this_episode: bool = False   # set to True when they confirm attendance
+
+
+@dataclass
+class EpisodeContext:
+    """Snapshot the reward calculator needs to score. The env assembles this.
+    This is intentionally narrow -- not the whole env state, just what rewards see.
+    """
+    current_time_min: int                                   # current simulated minute-of-day
+    contacts: Dict[str, ContactState]                       # by contact name
+    action_log: List[ActionRecord]                          # full episode history
+    conversations: Dict[Tuple[str, Channel], List[Dict]]    # (contact, ch) -> messages
+    calendar: List[Dict]                                    # existing events
+    orders_placed: List[Dict]                               # successful zomato/swiggy orders
+    maps_queries: List[Dict] = field(default_factory=list)  # maps api calls
+
+    # Convenience: filtered views
+    def actions_with_tool(self, tool: str) -> List[ActionRecord]:
+        return [a for a in self.action_log if a.tool_name == tool]
+
+    def actions_targeting_contact(self, contact: str) -> List[ActionRecord]:
+        return [
+            a for a in self.action_log
+            if a.arguments.get("contact") == contact
+        ]
+
+
+@dataclass
+class SubGoal:
+    """One graded sub-goal within a task."""
+    name: str
+    weight: float                       # 0.0 to 1.0; sum across a task should be 1.0
+    checker: Callable[[EpisodeContext], Tuple[bool, str]]
+    description: str = ""
+
+
+@dataclass
+class TaskDefinition:
+    tier: TaskTier
+    prompt: str
+    sub_goals: List[SubGoal]
+    urgency: UrgencyLevel
+    time_budget_minutes: int            # wall-clock-equivalent budget in simulated minutes
+    success_evaluator: Callable[[EpisodeContext], bool]
+    # The "ground truth" success for the truthfulness check; may be more
+    # strict than the sub-goal sum (e.g. binary "did Jay join?").
+
+
+@dataclass
+class RewardBreakdown:
+    """Returned to the env each call. `total` is what GRPO consumes."""
+    goal: float = 0.0
+    truthfulness: float = 0.0
+    efficiency: float = 0.0
+    appropriateness: float = 0.0
+    format_validity: float = 0.0
+    total: float = 0.0
+
+    # Rich per-component detail for logging / debugging
+    sub_goals_achieved: Dict[str, bool] = field(default_factory=dict)
+    sub_goal_evidence: Dict[str, str] = field(default_factory=dict)
+    spam_events: int = 0
+    time_violations: int = 0
+    channel_escalation_violations: int = 0
+    declared_success: Optional[bool] = None
+    ground_truth_success: Optional[bool] = None
+    hallucinated_actions_in_summary: List[str] = field(default_factory=list)
+
+    def recompute_total(self) -> None:
+        self.total = (
+            self.goal
+            + self.truthfulness
+            + self.efficiency
+            + self.appropriateness
+            + self.format_validity
+        )
+
+
+# ============================================================================
+# 2. Sub-goal checker helpers (shared utilities)
+# ============================================================================
+
+def _any_msg_sent_to(ctx: EpisodeContext, contact: str,
+                     via: Optional[Set[Channel]] = None) -> bool:
+    """Did the agent send any outbound communication to `contact`?"""
+    send_tools = {
+        "call", "whatsapp_call", "send_whatsapp", "send_sms", "send_email",
+    }
+    via_names = {c.value for c in via} if via else None
+    for a in ctx.action_log:
+        if a.tool_name not in send_tools:
+            continue
+        if a.arguments.get("contact") != contact:
+            continue
+        if via_names and _tool_to_channel(a.tool_name) not in via:
+            continue
+        return True
+    return False
+
+
+def _tool_to_channel(tool_name: str) -> Optional[Channel]:
+    return {
+        "call": Channel.CALL,
+        "whatsapp_call": Channel.WHATSAPP_CALL,
+        "send_whatsapp": Channel.WHATSAPP_MSG,
+        "send_sms": Channel.SMS,
+        "send_email": Channel.EMAIL,
+    }.get(tool_name)
+
+
+def _contact_responded(ctx: EpisodeContext, contact: str) -> bool:
+    cs = ctx.contacts.get(contact)
+    return bool(cs and cs.has_responded_this_episode)
+
+
+def _contact_confirmed(ctx: EpisodeContext, contact: str) -> bool:
+    cs = ctx.contacts.get(contact)
+    return bool(cs and cs.confirmed_plan_this_episode)
+
+
+def _msg_text_contains(ctx: EpisodeContext, contact: str,
+                       required_any_of: List[List[str]]) -> bool:
+    """Does at least one outbound message to `contact` contain at least one
+    token from each inner list? (AND-of-ORs pattern.)"""
+    outbound_texts: List[str] = []
+    for a in ctx.action_log:
+        if a.arguments.get("contact") != contact:
+            continue
+        if a.tool_name in {"send_whatsapp", "send_sms"}:
+            outbound_texts.append((a.arguments.get("text") or "").lower())
+        elif a.tool_name == "send_email":
+            outbound_texts.append(
+                ((a.arguments.get("subject") or "") + " "
+                 + (a.arguments.get("body") or "")).lower()
+            )
+    for text in outbound_texts:
+        if all(any(token.lower() in text for token in group)
+               for group in required_any_of):
+            return True
+    return False
+
+
+def _waited_between(ctx: EpisodeContext, contact: str, min_wait: int) -> bool:
+    """Did the agent wait >= min_wait minutes between two attempts on this contact?"""
+    times = [
+        a.simulated_time_min for a in ctx.actions_targeting_contact(contact)
+        if a.tool_name in {"call", "whatsapp_call", "send_whatsapp",
+                           "send_sms", "send_email"}
+    ]
+    if len(times) < 2:
+        return False
+    times.sort()
+    return any(b - a >= min_wait for a, b in zip(times, times[1:]))
+
+
+def _escalated_channel(ctx: EpisodeContext, contact: str) -> bool:
+    """Did the agent try at least two *different* channels for this contact?"""
+    channels_used: Set[Channel] = set()
+    for a in ctx.actions_targeting_contact(contact):
+        ch = _tool_to_channel(a.tool_name)
+        if ch:
+            channels_used.add(ch)
+    return len(channels_used) >= 2
+
+
+def _tool_called(ctx: EpisodeContext, tool: str,
+                 args_contain: Optional[Dict[str, Any]] = None) -> bool:
+    for a in ctx.action_log:
+        if a.tool_name != tool:
+            continue
+        if args_contain:
+            if not all(str(args_contain[k]).lower() in
+                       str(a.arguments.get(k, "")).lower()
+                       for k in args_contain):
+                continue
+        return True
+    return False
+
+
+# ============================================================================
+# 3. Task-specific sub-goal checkers + definitions
+# ============================================================================
+
+# --- EASY: "Let Ria know I'll be 10 minutes late to our 4pm meeting" ---------
+
+def _easy_reached_ria(ctx: EpisodeContext) -> Tuple[bool, str]:
+    reached = _any_msg_sent_to(ctx, "Ria")
+    return reached, ("sent at least one outbound to Ria" if reached
+                     else "no outbound to Ria yet")
+
+
+def _easy_message_conveyed_delay(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = _msg_text_contains(ctx, "Ria",
+                            required_any_of=[
+                                ["late", "delay", "running late", "10 min"],
+                                ["4", "4pm", "four", "meeting"],
+                            ])
+    return ok, ("message mentions delay + time" if ok else
+                "outbound text missing delay or 4pm reference")
+
+
+def _easy_ria_acknowledged(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = _contact_responded(ctx, "Ria")
+    return ok, ("Ria responded" if ok else "no reply from Ria yet")
+
+
+def _easy_success(ctx: EpisodeContext) -> bool:
+    # Ground truth: Ria acknowledged within the 5-min window.
+    return _contact_responded(ctx, "Ria")
+
+
+EASY_TASK = TaskDefinition(
+    tier=TaskTier.EASY,
+    prompt="Let Ria know I'll be 10 minutes late to our 4pm meeting.",
+    urgency=UrgencyLevel.MEDIUM,
+    time_budget_minutes=15,
+    sub_goals=[
+        SubGoal("reached_ria", 0.3, _easy_reached_ria,
+                "Any outbound communication to Ria"),
+        SubGoal("message_conveyed_delay", 0.2, _easy_message_conveyed_delay,
+                "Message mentions the delay and the meeting time"),
+        SubGoal("ria_acknowledged", 0.5, _easy_ria_acknowledged,
+                "Ria replies"),
+    ],
+    success_evaluator=_easy_success,
+)
+
+
+# --- MEDIUM: "Get Jay to join the 3pm standup call. It's urgent." ------------
+
+def _medium_appropriate_first_channel(ctx: EpisodeContext) -> Tuple[bool, str]:
+    first = next((a for a in ctx.actions_targeting_contact("Jay")
+                  if a.tool_name in {"call", "whatsapp_call", "send_whatsapp",
+                                     "send_sms", "send_email"}), None)
+    if not first:
+        return False, "no attempt on Jay yet"
+    ok = first.tool_name in {"call", "whatsapp_call"}
+    return ok, (f"first attempt was {first.tool_name}"
+                if ok else f"first attempt was {first.tool_name}; "
+                           "expected a voice channel for urgent task")
+
+
+def _medium_waited_before_escalating(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = _waited_between(ctx, "Jay", min_wait=2)
+    return ok, ("paused >=2 min between attempts" if ok
+                else "escalated too quickly")
+
+
+def _medium_escalated_when_failed(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = _escalated_channel(ctx, "Jay")
+    return ok, ("used multiple channels" if ok else "only one channel tried")
+
+
+def _medium_clear_urgency_message(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = _msg_text_contains(ctx, "Jay",
+                            required_any_of=[
+                                ["3pm", "3 pm", "standup", "stand-up", "3:00"],
+                                ["urgent", "asap", "now", "important", "join"],
+                            ])
+    return ok, ("message conveys urgency + meeting ref" if ok else
+                "message missing urgency or meeting reference")
+
+
+def _medium_jay_joined_in_time(ctx: EpisodeContext) -> Tuple[bool, str]:
+    # The env marks `has_responded_this_episode` + `confirmed_plan_this_episode`
+    # for Jay if he joins; we also require the response to have landed before 3:10pm.
+    joined = _contact_confirmed(ctx, "Jay")
+    return joined, ("Jay confirmed/joined" if joined
+                    else "Jay did not join in time")
+
+
+def _medium_success(ctx: EpisodeContext) -> bool:
+    # Deadline = 15:10 (3:10pm) in simulated minute-of-day terms.
+    return _contact_confirmed(ctx, "Jay") and ctx.current_time_min <= 15 * 60 + 10
+
+
+MEDIUM_TASK = TaskDefinition(
+    tier=TaskTier.MEDIUM,
+    prompt="Get Jay to join the 3pm standup call. It's urgent.",
+    urgency=UrgencyLevel.HIGH,
+    time_budget_minutes=30,
+    sub_goals=[
+        SubGoal("appropriate_first_channel", 0.15,
+                _medium_appropriate_first_channel,
+                "First attempt was a voice channel (call/whatsapp_call)"),
+        SubGoal("waited_before_escalating", 0.10,
+                _medium_waited_before_escalating,
+                "At least 2 min between attempts"),
+        SubGoal("escalated_when_failed", 0.15,
+                _medium_escalated_when_failed,
+                "Tried multiple channels"),
+        SubGoal("clear_urgency_message", 0.15,
+                _medium_clear_urgency_message,
+                "Message included urgency + meeting reference"),
+        SubGoal("jay_joined_in_time", 0.45, _medium_jay_joined_in_time,
+                "Jay confirmed in time"),
+    ],
+    success_evaluator=_medium_success,
+)
+
+
+# --- HARD: "Dinner tonight for me, Jay, Ria, and Mira. Sushi place Jay mentioned."
+
+def _hard_read_prior_messages(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = any(a.tool_name == "read_messages" and a.arguments.get("contact") == "Jay"
+             for a in ctx.action_log)
+    return ok, ("read Jay's messages" if ok else "never read Jay's messages")
+
+
+def _hard_verified_restaurant(ctx: EpisodeContext) -> Tuple[bool, str]:
+    keywords = ["sushi", "japanese"]
+    for tool in ("zomato_search", "swiggy_search", "web_search"):
+        for a in ctx.actions_with_tool(tool):
+            q = str(a.arguments.get("query", "")).lower()
+            if any(k in q for k in keywords):
+                return True, f"{tool} for sushi"
+    return False, "no sushi search performed"
+
+
+def _hard_checked_availability(ctx: EpisodeContext) -> Tuple[bool, str]:
+    if _tool_called(ctx, "calendar_view"):
+        return True, "checked calendar"
+    # Or: asked at least 2 of the 3 contacts about availability
+    asked = 0
+    for contact in ("Jay", "Ria", "Mira"):
+        if _msg_text_contains(ctx, contact,
+                              required_any_of=[
+                                  ["dinner", "tonight", "free", "available"],
+                              ]):
+            asked += 1
+    if asked >= 2:
+        return True, f"asked {asked}/3 contacts re availability"
+    return False, f"only asked {asked}/3 contacts and skipped calendar"
+
+
+def _hard_handled_friction(ctx: EpisodeContext) -> Tuple[bool, str]:
+    # Proxy: agent proposed an alternative time OR rescheduled something
+    if _tool_called(ctx, "calendar_reschedule"):
+        return True, "rescheduled calendar"
+    for c in ("Jay", "Ria", "Mira"):
+        if _msg_text_contains(ctx, c,
+                              required_any_of=[
+                                  ["alternative", "another", "instead",
+                                   "or we could", "how about"],
+                              ]):
+            return True, f"offered alternative to {c}"
+    return False, "no flexibility shown"
+
+
+def _hard_booked_restaurant(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = len(ctx.orders_placed) > 0 or _tool_called(ctx, "calendar_add")
+    return ok, ("booking/order placed" if ok else "no booking")
+
+
+def _hard_all_three_confirmed(ctx: EpisodeContext) -> Tuple[bool, str]:
+    confirmed = [c for c in ("Jay", "Ria", "Mira") if _contact_confirmed(ctx, c)]
+    ok = len(confirmed) == 3
+    return ok, f"{len(confirmed)}/3 confirmed: {confirmed}"
+
+
+def _hard_success(ctx: EpisodeContext) -> bool:
+    booked, _ = _hard_booked_restaurant(ctx)
+    all_in, _ = _hard_all_three_confirmed(ctx)
+    return booked and all_in
+
+
+HARD_TASK = TaskDefinition(
+    tier=TaskTier.HARD,
+    prompt=("Dinner tonight for me, Jay, Ria, and Mira. Jay was raving about a "
+            "new sushi place last week -- set that up. Make sure all three are in."),
+    urgency=UrgencyLevel.MEDIUM,
+    time_budget_minutes=60,
+    sub_goals=[
+        SubGoal("read_prior_messages", 0.15, _hard_read_prior_messages,
+                "Read Jay's message history to find the restaurant"),
+        SubGoal("verified_restaurant", 0.10, _hard_verified_restaurant,
+                "Searched for the place in Zomato/Swiggy/web"),
+        SubGoal("checked_availability", 0.15, _hard_checked_availability,
+                "Checked calendar or asked contacts about availability"),
+        SubGoal("handled_friction", 0.15, _hard_handled_friction,
+                "Proposed alternatives or rescheduled"),
+        SubGoal("booked_restaurant", 0.15, _hard_booked_restaurant,
+                "Placed order or created calendar event"),
+        SubGoal("all_three_confirmed", 0.30, _hard_all_three_confirmed,
+                "All three contacts confirmed attendance"),
+    ],
+    success_evaluator=_hard_success,
+)
+
+
+# --- COMPLEX: vegetarian / 7pm-ria / 15km-mira / 900-per-person ----------
+
+def _complex_filtered_vegetarian(ctx: EpisodeContext) -> Tuple[bool, str]:
+    for tool in ("zomato_search", "swiggy_search"):
+        for a in ctx.actions_with_tool(tool):
+            filters = a.arguments.get("filters") or {}
+            q = str(a.arguments.get("query", "")).lower()
+            if "veg" in q or filters.get("vegetarian"):
+                return True, f"{tool} used vegetarian filter/query"
+    return False, "no vegetarian filter used"
+
+
+def _complex_checked_maps(ctx: EpisodeContext) -> Tuple[bool, str]:
+    ok = any("Mira" in str(a.arguments) for a in ctx.maps_queries) or \
+         _tool_called(ctx, "maps_travel_time")
+    return ok, ("Maps used for Mira or travel times" if ok
+                else "no maps queries")
+
+
+def _complex_resolved_ria_conflict(ctx: EpisodeContext) -> Tuple[bool, str]:
+    # Proxy: any calendar_view for today, plus booking time != 7pm
+    saw_cal = _tool_called(ctx, "calendar_view")
+    booking_times = [o.get("delivery_time") or o.get("time")
+                     for o in ctx.orders_placed]
+    ok = saw_cal and all("19:" not in str(t) for t in booking_times if t)
+    return ok, ("checked calendar and avoided 7pm slot" if ok
+                else "did not resolve Ria's 7pm conflict")
+
+
+def _complex_compared_prices(ctx: EpisodeContext) -> Tuple[bool, str]:
+    used_zomato = len(ctx.actions_with_tool("zomato_search")) > 0 or \
+                  len(ctx.actions_with_tool("zomato_open")) > 0
+    used_swiggy = len(ctx.actions_with_tool("swiggy_search")) > 0 or \
+                  len(ctx.actions_with_tool("swiggy_open")) > 0
+    ok = used_zomato and used_swiggy
+    return ok, (f"zomato={used_zomato}, swiggy={used_swiggy}"
+                if ok else "only one food app consulted")
+
+
+def _complex_within_budget(ctx: EpisodeContext) -> Tuple[bool, str]:
+    if not ctx.orders_placed:
+        return False, "no order to check budget on"
+    total = sum(float(o.get("total_price") or 0) for o in ctx.orders_placed)
+    per_person = total / 4.0
+    ok = per_person <= 900.0
+    return ok, f"Rs {per_person:.0f}/person (limit 900)"
+
+
+def _complex_all_confirmed(ctx: EpisodeContext) -> Tuple[bool, str]:
+    confirmed = [c for c in ("Jay", "Ria", "Mira") if _contact_confirmed(ctx, c)]
+    ok = len(confirmed) == 3
+    return ok, f"{len(confirmed)}/3 confirmed"
+
+
+def _complex_success(ctx: EpisodeContext) -> bool:
+    veg, _ = _complex_filtered_vegetarian(ctx)
+    budget, _ = _complex_within_budget(ctx)
+    conf, _ = _complex_all_confirmed(ctx)
+    return veg and budget and conf
+
+
+COMPLEX_TASK = TaskDefinition(
+    tier=TaskTier.COMPLEX,
+    prompt=("Book dinner tonight for me + Jay + Ria + Mira. Jay is vegetarian. "
+            "Ria has a 7pm call. Mira lives 15km from the rest of us. Keep it "
+            "under Rs 900/person including delivery. Get explicit confirmation "
+            "from all three."),
+    urgency=UrgencyLevel.MEDIUM,
+    time_budget_minutes=90,
+    sub_goals=[
+        SubGoal("filtered_vegetarian", 0.10, _complex_filtered_vegetarian,
+                "Searched with vegetarian filter/query"),
+        SubGoal("checked_maps", 0.15, _complex_checked_maps,
+                "Used Maps for location/distance reasoning"),
+        SubGoal("resolved_ria_conflict", 0.15, _complex_resolved_ria_conflict,
+                "Avoided 7pm, used calendar"),
+        SubGoal("compared_prices", 0.15, _complex_compared_prices,
+                "Queried both Zomato and Swiggy"),
+        SubGoal("within_budget", 0.10, _complex_within_budget,
+                "Order stayed within Rs 900/person"),
+        SubGoal("all_confirmed", 0.35, _complex_all_confirmed,
+                "All three contacts confirmed"),
+    ],
+    success_evaluator=_complex_success,
+)
+
+
+TASK_REGISTRY: Dict[TaskTier, TaskDefinition] = {
+    TaskTier.EASY: EASY_TASK,
+    TaskTier.MEDIUM: MEDIUM_TASK,
+    TaskTier.HARD: HARD_TASK,
+    TaskTier.COMPLEX: COMPLEX_TASK,
+}
+
+
+# ============================================================================
+# 4. Reward component functions
+# ============================================================================
+
+# -- weights (tune as needed; see PRD section 6) -----------------------------
+
+W_GOAL = 1.0                       # max +1.0 across sub-goals
+W_TRUTHFULNESS_LIE = -1.0          # lying about success
+W_TRUTHFULNESS_FAKE_ACTION = -0.5  # claiming actions that didn't happen
+W_EFFICIENCY_PER_ACTION = -0.02
+W_SPAM = -0.10                     # per spam event
+W_TIME_OF_DAY = -0.15              # per inappropriate-hour action
+W_CHANNEL_ESCALATION = -0.05       # per too-fast escalation
+W_FORMAT_ERROR = -0.05             # per malformed tool call
+FORMAT_ERROR_TERMINATION_STREAK = 3
+
+# Hours considered "inappropriate" for non-urgent contact
+INAPPROPRIATE_START_MIN = 22 * 60      # 22:00
+INAPPROPRIATE_END_MIN = 7 * 60         # 07:00
+
+
+# -- Component 1: Goal achievement --------------------------------------------
+
+def compute_goal_reward(task: TaskDefinition, ctx: EpisodeContext
+                        ) -> Tuple[float, Dict[str, bool], Dict[str, str]]:
+    """Sum weighted sub-goal achievements. Result is in [0, 1]."""
+    total = 0.0
+    achieved: Dict[str, bool] = {}
+    evidence: Dict[str, str] = {}
+    for sg in task.sub_goals:
+        ok, why = sg.checker(ctx)
+        achieved[sg.name] = ok
+        evidence[sg.name] = why
+        if ok:
+            total += sg.weight
+    return total * W_GOAL, achieved, evidence
+
+
+# -- Component 2: Truthfulness -----------------------------------------------
+
+_FAKE_ACTION_PATTERNS = [
+    r"(?i)\b(?:i\s+)?(called|texted|emailed|whatsapp(?:ed)?|messaged)\b",
+    r"(?i)\b(?:i\s+)?(booked|ordered|reserved|scheduled)\b",
+    r"(?i)\b(?:i\s+)?(confirmed)\b",
+]
+
+
+def _summary_mentions_absent_actions(summary: str, ctx: EpisodeContext
+                                     ) -> List[str]:
+    """Find verbs in the agent's summary that aren't supported by the log.
+    This is a best-effort heuristic; false positives are acceptable -- it's
+    meant to create pressure against blatant hallucination, not to be perfect.
+    """
+    if not summary:
+        return []
+    tool_names_used = {a.tool_name for a in ctx.action_log}
+    hallucinations: List[str] = []
+
+    verb_to_required_tool = {
+        "called":      {"call", "whatsapp_call"},
+        "texted":      {"send_sms", "send_whatsapp"},
+        "emailed":     {"send_email"},
+        "whatsapped":  {"send_whatsapp", "whatsapp_call"},
+        "whatsapp":    {"send_whatsapp", "whatsapp_call"},
+        "messaged":    {"send_sms", "send_whatsapp", "send_email"},
+        "booked":      {"zomato_order", "swiggy_order", "calendar_add"},
+        "ordered":     {"zomato_order", "swiggy_order"},
+        "reserved":    {"zomato_order", "swiggy_order", "calendar_add"},
+        "scheduled":   {"calendar_add"},
+        "confirmed":   set(),  # always checked via contacts state below
+    }
+
+    lowered = summary.lower()
+    for verb, required in verb_to_required_tool.items():
+        if verb not in lowered:
+            continue
+        if verb == "confirmed":
+            # Claim must match at least one actually-confirmed contact
+            confirmed = [c for c in ctx.contacts.values()
+                         if c.confirmed_plan_this_episode]
+            if not confirmed:
+                hallucinations.append(verb)
+            continue
+        if not (required & tool_names_used):
+            hallucinations.append(verb)
+    return hallucinations
+
+
+def compute_truthfulness_reward(
+    ctx: EpisodeContext,
+    end_task_args: Optional[Dict[str, Any]],
+    ground_truth_success: bool,
+) -> Tuple[float, Optional[bool], List[str]]:
+    """Evaluates truthfulness at end_task(). Not called mid-episode.
+
+    Returns: (reward, declared_success_claim, hallucinated_verbs).
+    """
+    if end_task_args is None:
+        return 0.0, None, []
+
+    declared = bool(end_task_args.get("success_claim"))
+    summary = str(end_task_args.get("summary", ""))
+
+    reward = 0.0
+    # Lie penalty: declared success but task actually failed
+    if declared and not ground_truth_success:
+        reward += W_TRUTHFULNESS_LIE
+    # Honest negative: declared False and it was False -> no penalty (fine)
+    # Honest positive: declared True and it was True -> no penalty (fine)
+
+    hallucinated = _summary_mentions_absent_actions(summary, ctx)
+    if hallucinated:
+        reward += W_TRUTHFULNESS_FAKE_ACTION
+
+    return reward, declared, hallucinated
+
+
+# -- Component 3: Efficiency -------------------------------------------------
+
+def compute_efficiency_reward_for_step(tool_name: str) -> float:
+    """Called per step. Most tools cost -0.02; `think` is free; `wait` is free
+    (we don't want to discourage waiting when it's the right move).
+    """
+    if tool_name in {"think", "wait"}:
+        return 0.0
+    return W_EFFICIENCY_PER_ACTION
+
+
+# -- Component 4: Appropriateness --------------------------------------------
+
+def compute_appropriateness_reward_for_step(
+    action: ActionRecord,
+    ctx_before: EpisodeContext,
+    urgency: UrgencyLevel,
+) -> Tuple[float, int, int, int]:
+    """Computed per step, BEFORE the action mutates state.
+
+    Returns (reward, spam_events, time_violations, channel_violations).
+    """
+    reward = 0.0
+    spam = 0
+    time_viol = 0
+    ch_viol = 0
+
+    tool = action.tool_name
+    contact = action.arguments.get("contact")
+    channel = _tool_to_channel(tool)
+
+    # 4a. Spam: sending a text to a contact who already has unreplied texts
+    if tool in {"send_whatsapp", "send_sms", "send_email"} and contact:
+        cs = ctx_before.contacts.get(contact)
+        if cs and cs.unanswered_msgs_from_agent >= 2:
+            reward += W_SPAM
+            spam += 1
+
+    # 4b. Time-of-day appropriateness
+    if urgency != UrgencyLevel.HIGH and channel and channel in VOICE_CHANNELS:
+        t = ctx_before.current_time_min % (24 * 60)
+        if t >= INAPPROPRIATE_START_MIN or t < INAPPROPRIATE_END_MIN:
+            reward += W_TIME_OF_DAY
+            time_viol += 1
+
+    # 4c. Channel-escalation too fast
+    if channel in TEXT_CHANNELS and contact:
+        cs = ctx_before.contacts.get(contact)
+        if cs and cs.last_action_by_agent_min is not None \
+                and cs.last_channel_attempted in TEXT_CHANNELS \
+                and cs.last_channel_attempted != channel:
+            elapsed = ctx_before.current_time_min - cs.last_action_by_agent_min
+            prev_window = TYPICAL_REPLY_WINDOW_MIN.get(cs.last_channel_attempted, 15)
+            if elapsed < prev_window:
+                reward += W_CHANNEL_ESCALATION
+                ch_viol += 1
+
+    return reward, spam, time_viol, ch_viol
+
+
+# -- Component 5: Format validity --------------------------------------------
+
+def compute_format_reward_for_step(parse_error: Optional[str]) -> float:
+    return W_FORMAT_ERROR if parse_error else 0.0
+
+
+# ============================================================================
+# 5. RewardCalculator: stateful orchestrator
+# ============================================================================
+
+@dataclass
+class RewardCalculator:
+    """One instance per episode. The env holds this and calls step_reward /
+    episode_end_reward around each env.step() and env.end_task() respectively.
+    """
+    task: TaskDefinition
+    episode_start_time_of_day_min: int = 9 * 60   # default 9am start
+
+    _format_error_streak: int = 0
+    _cumulative_goal: float = 0.0                 # highest goal-reward seen so far
+    # (goal is reported as the delta since the last step, so the total across
+    # steps equals the final goal value at episode end.)
+
+    def step_reward(
+        self,
+        action: ActionRecord,
+        ctx_after_step: EpisodeContext,
+        parse_error: Optional[str] = None,
+        ctx_before_step: Optional[EpisodeContext] = None,
+    ) -> RewardBreakdown:
+        """Reward for one env step. Called AFTER the env state has been
+        updated by the action. Pass the pre-update ctx for appropriateness
+        checks (spam/time/channel depend on state at decision time).
+        """
+        rb = RewardBreakdown()
+
+        # Component 1: goal (incremental -- report delta since last step)
+        new_goal, achieved, evidence = compute_goal_reward(self.task, ctx_after_step)
+        rb.goal = new_goal - self._cumulative_goal
+        self._cumulative_goal = new_goal
+        rb.sub_goals_achieved = achieved
+        rb.sub_goal_evidence = evidence
+
+        # Component 3: efficiency
+        rb.efficiency = compute_efficiency_reward_for_step(action.tool_name)
+
+        # Component 4: appropriateness
+        if ctx_before_step is not None:
+            appr, spam, tv, cv = compute_appropriateness_reward_for_step(
+                action, ctx_before_step, self.task.urgency
+            )
+            rb.appropriateness = appr
+            rb.spam_events = spam
+            rb.time_violations = tv
+            rb.channel_escalation_violations = cv
+
+        # Component 5: format
+        rb.format_validity = compute_format_reward_for_step(parse_error)
+        if parse_error:
+            self._format_error_streak += 1
+        else:
+            self._format_error_streak = 0
+
+        # Truthfulness is only computed at end_task(); 0 here.
+        rb.truthfulness = 0.0
+
+        rb.recompute_total()
+        return rb
+
+    def episode_end_reward(
+        self,
+        ctx_final: EpisodeContext,
+        end_task_args: Optional[Dict[str, Any]],
+    ) -> RewardBreakdown:
+        """Reward resolved at episode end. Handles truthfulness + ensures
+        the final goal-state is fully reflected.
+        """
+        rb = RewardBreakdown()
+
+        # Final goal (may include sub-goals that only resolve at episode end,
+        # e.g. "ria_acknowledged" if her reply arrives late)
+        final_goal, achieved, evidence = compute_goal_reward(self.task, ctx_final)
+        rb.goal = final_goal - self._cumulative_goal   # remaining delta
+        self._cumulative_goal = final_goal
+        rb.sub_goals_achieved = achieved
+        rb.sub_goal_evidence = evidence
+
+        # Truthfulness: the critical anti-hack check
+        gt = self.task.success_evaluator(ctx_final)
+        trust_reward, declared, halluc = compute_truthfulness_reward(
+            ctx_final, end_task_args, gt
+        )
+        rb.truthfulness = trust_reward
+        rb.declared_success = declared
+        rb.ground_truth_success = gt
+        rb.hallucinated_actions_in_summary = halluc
+
+        rb.recompute_total()
+        return rb
+
+    @property
+    def should_terminate_for_format(self) -> bool:
+        return self._format_error_streak >= FORMAT_ERROR_TERMINATION_STREAK
+
+
+# ============================================================================
+# 6. Tiny smoke test -- run `python rewards.py` to see it working
+# ============================================================================
+
+def _smoke_test() -> None:
+    """Builds a tiny synthetic episode for the EASY task and shows rewards
+    fire correctly. This is a correctness sanity check, not a real test suite.
+    """
+    ctx = EpisodeContext(
+        current_time_min=15 * 60 + 50,   # 3:50pm -- 10 min before 4pm
+        contacts={"Ria": ContactState(name="Ria")},
+        action_log=[],
+        conversations={},
+        calendar=[],
+        orders_placed=[],
+    )
+    calc = RewardCalculator(task=EASY_TASK,
+                            episode_start_time_of_day_min=15 * 60 + 50)
+
+    # Action 1: send WhatsApp to Ria about being late
+    action = ActionRecord(
+        simulated_time_min=15 * 60 + 50,
+        tool_name="send_whatsapp",
+        arguments={"contact": "Ria",
+                   "text": "hey, running late to our 4pm meeting, will be there in 10"},
+        outcome="delivered",
+    )
+    ctx.action_log.append(action)
+    ctx.contacts["Ria"].unanswered_msgs_from_agent = 1
+    ctx.contacts["Ria"].last_action_by_agent_min = 15 * 60 + 50
+    ctx.contacts["Ria"].last_channel_attempted = Channel.WHATSAPP_MSG
+
+    r1 = calc.step_reward(action, ctx_after_step=ctx, ctx_before_step=ctx)
+    print("After send_whatsapp:", r1.total, r1.sub_goals_achieved)
+
+    # Action 2: Ria responds
+    ctx.contacts["Ria"].has_responded_this_episode = True
+    ctx.contacts["Ria"].unanswered_msgs_from_agent = 0
+    ctx.current_time_min += 2
+
+    # Action 3: agent calls end_task honestly
+    end_args = {"success_claim": True,
+                "summary": "Texted Ria that I'll be 10 min late; she confirmed."}
+    r2 = calc.episode_end_reward(ctx, end_args)
+    print("At end_task (honest):", r2.total,
+          "declared=", r2.declared_success,
+          "gt=", r2.ground_truth_success,
+          "halluc=", r2.hallucinated_actions_in_summary)
+
+    # Counter-factual: what if the agent LIED about Ria confirming?
+    ctx2 = EpisodeContext(
+        current_time_min=ctx.current_time_min,
+        contacts={"Ria": ContactState(name="Ria")},   # Ria never responded
+        action_log=[action],
+        conversations={},
+        calendar=[],
+        orders_placed=[],
+    )
+    ctx2.contacts["Ria"].unanswered_msgs_from_agent = 1
+    calc_lie = RewardCalculator(task=EASY_TASK,
+                                episode_start_time_of_day_min=15 * 60 + 50)
+    # step to populate goal state
+    calc_lie.step_reward(action, ctx_after_step=ctx2, ctx_before_step=ctx2)
+    lie_args = {"success_claim": True,
+                "summary": "I called Ria and she confirmed."}  # neither happened
+    r3 = calc_lie.episode_end_reward(ctx2, lie_args)
+    print("At end_task (LIED):", r3.total,
+          "truthfulness=", r3.truthfulness,
+          "halluc=", r3.hallucinated_actions_in_summary)
+
+
+if __name__ == "__main__":
+    _smoke_test()

@@ -1,0 +1,41 @@
+[project]
+name = "phonepilot-env"
+version = "0.1.0"
+description = "PhonePilot — a simulated smartphone-OS OpenEnv environment for training small LLMs as personal assistants (Meta PyTorch x OpenEnv Hackathon, Team LAKERS)."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [
+    { name = "LAKERS", email = "team@lakers.invalid" },
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+    "anthropic>=0.39",
+    "openenv-core",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/phonepilot_env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

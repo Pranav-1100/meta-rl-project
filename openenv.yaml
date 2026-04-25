@@ -1,0 +1,6 @@
+spec_version: 1
+name: phonepilot
+type: space
+runtime: fastapi
+app: phonepilot_env.server:app
+port: 8000
