@@ -238,27 +238,11 @@ from transformers import TrainerCallback
 import csv as _csv
 import random as _random
 
-def rollout_reward(prompts, completions, **kwargs):
-    """The GRPO reward fn. Each (prompt, completion) pair is one agent turn. We don't
-    pay the full episode-unroll cost inside the trainer — instead we execute ONE step
-    against a fresh env seeded so reward contains both the immediate signal (sub-goal
-    firing, format penalty) and the downstream reward it enables via the env's internal
-    state."""
-    rewards = []
-    for i, completion in enumerate(completions):
-        # Extract task_id + seed from the prompt metadata (we injected it in the dataset).
-        task_id = kwargs["task_id"][i]
-        seed = int(kwargs["seed"][i])
-        try:
-            action = parse_completion_to_action(completion)
-        except AgentParseError:
-            rewards.append(-0.5)   # format-error floor
-            continue
-        env = build_env()
-        env.reset(seed=seed, episode_id=f"grpo_{task_id}_{seed}", task_id=task_id)
-        obs = env.step(action)
-        rewards.append(float(obs.reward or 0.0))
-    return rewards
+# Import the rollout reward from the module so it's testable end-to-end via pytest
+# (see tests/test_grpo_reward.py). The function executes a single env step per
+# completion and returns the per-step reward; the GRPO group-relative advantage then
+# differentiates within each prompt's K rollouts.
+from phonepilot_env.grpo_reward import FORMAT_FLOOR_REWARD, rollout_reward  # noqa: E402
 
 
 # %% [markdown]
