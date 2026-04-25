@@ -1,0 +1,18 @@
+{
+  "policy": "random",
+  "n_passed": 1,
+  "n_total": 10,
+  "score": 0.1,
+  "by_probe": {
+    "p01_send_one_line_whatsapp": false,
+    "p02_search_pizza": false,
+    "p03_view_calendar": false,
+    "p04_travel_time_query": true,
+    "p05_read_messages_from_jay": false,
+    "p06_web_search_biryani": false,
+    "p07_calendar_add_event": false,
+    "p08_send_email_simple": false,
+    "p09_swiggy_search_veg": false,
+    "p10_calendar_reschedule": false
+  }
+}

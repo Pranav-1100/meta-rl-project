@@ -34,6 +34,7 @@ from phonepilot_env.actions import PhonePilotAction, TOOL_NAMES  # noqa: E402
 from phonepilot_env.agent_io import observation_to_prompt  # noqa: E402
 from phonepilot_env.env import build_env  # noqa: E402
 from phonepilot_env.observations import PhonePilotObservation  # noqa: E402
+from phonepilot_env.tasks import TASK_REGISTRY  # noqa: E402
 
 
 Policy = Callable[[PhonePilotObservation, random.Random], dict]
@@ -196,12 +197,7 @@ def main() -> None:
     p.add_argument(
         "--task",
         default="easy_ria_late",
-        choices=[
-            "easy_ria_late",
-            "medium_jay_standup",
-            "hard_dinner_sushi",
-            "complex_multi_objective_dinner",
-        ],
+        choices=list(TASK_REGISTRY.keys()),
     )
     p.add_argument("--policy", default="scripted_easy", choices=sorted(POLICIES))
     p.add_argument("--seed", type=int, default=1)

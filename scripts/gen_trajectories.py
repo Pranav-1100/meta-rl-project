@@ -65,6 +65,7 @@ from phonepilot_env.agent_io import (  # noqa: E402
 )
 from phonepilot_env.env import build_env  # noqa: E402
 from phonepilot_env.observations import PhonePilotObservation  # noqa: E402
+from phonepilot_env.tasks import training_task_ids  # noqa: E402
 
 
 TRAJ_DIR = Path(__file__).resolve().parent.parent / "data" / "trajectories"
@@ -253,12 +254,8 @@ def main() -> int:
     p.add_argument(
         "--task",
         required=True,
-        choices=[
-            "easy_ria_late",
-            "medium_jay_standup",
-            "hard_dinner_sushi",
-            "complex_multi_objective_dinner",
-        ],
+        choices=training_task_ids(),
+        help="Training task id. Held-out adversarial tasks are intentionally excluded.",
     )
     p.add_argument("--count", type=int, default=10, help="number of episodes to generate")
     p.add_argument("--seed-start", type=int, default=1)
