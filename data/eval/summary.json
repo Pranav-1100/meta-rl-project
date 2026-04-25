@@ -4,39 +4,42 @@
     "task_id": "easy_ria_late",
     "task_difficulty": "easy",
     "n_episodes": 5,
-    "mean_reward": -0.30800000000000005,
-    "median_reward": -0.02,
-    "stdev_reward": 0.697033715109965,
+    "mean_reward": -0.29120000000000007,
+    "median_reward": 0.057999999999999705,
+    "stdev_reward": 0.6563555134224135,
     "success_rate": 0.4,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 11.6
+    "mean_turns": 11.6,
+    "mean_calibration": 0.016799999999999992
   },
   {
     "baseline": "random",
     "task_id": "medium_jay_standup",
     "task_difficulty": "medium",
     "n_episodes": 5,
-    "mean_reward": -0.42800000000000005,
-    "median_reward": -0.10000000000000002,
-    "stdev_reward": 0.4914631217090455,
+    "mean_reward": -0.3668,
+    "median_reward": -0.07999999999999999,
+    "stdev_reward": 0.49769163143456613,
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 9.6
+    "mean_turns": 9.6,
+    "mean_calibration": 0.06120000000000001
   },
   {
     "baseline": "random",
     "task_id": "hard_dinner_sushi",
     "task_difficulty": "hard",
     "n_episodes": 5,
-    "mean_reward": -0.388,
-    "median_reward": -0.13000000000000003,
-    "stdev_reward": 0.5071252310820277,
+    "mean_reward": -0.30720000000000003,
+    "median_reward": -0.03200000000000004,
+    "stdev_reward": 0.5285188359935717,
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 11.6
+    "mean_turns": 11.6,
+    "mean_calibration": 0.08080000000000001
   },
   {
     "baseline": "null",
@@ -49,7 +52,8 @@
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 6.0
+    "mean_turns": 6.0,
+    "mean_calibration": 0.0
   },
   {
     "baseline": "null",
@@ -62,7 +66,8 @@
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 3.0
+    "mean_turns": 3.0,
+    "mean_calibration": 0.0
   },
   {
     "baseline": "null",
@@ -75,45 +80,49 @@
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 9.0
+    "mean_turns": 9.0,
+    "mean_calibration": 0.0
   },
   {
     "baseline": "scripted_easy",
     "task_id": "easy_ria_late",
     "task_difficulty": "easy",
     "n_episodes": 5,
-    "mean_reward": 0.9399999999999998,
-    "median_reward": 0.94,
+    "mean_reward": 1.038,
+    "median_reward": 1.038,
     "stdev_reward": 0.0,
     "success_rate": 1.0,
     "pass_at_3": 1.0,
     "pass_at_5": 1.0,
-    "mean_turns": 3.0
+    "mean_turns": 3.0,
+    "mean_calibration": 0.098
   },
   {
     "baseline": "scripted_easy",
     "task_id": "medium_jay_standup",
     "task_difficulty": "medium",
     "n_episodes": 5,
-    "mean_reward": -0.96,
-    "median_reward": -0.96,
+    "mean_reward": -1.022,
+    "median_reward": -1.022,
     "stdev_reward": 0.0,
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 3.0
+    "mean_turns": 3.0,
+    "mean_calibration": -0.062000000000000034
   },
   {
     "baseline": "scripted_easy",
     "task_id": "hard_dinner_sushi",
     "task_difficulty": "hard",
     "n_episodes": 5,
-    "mean_reward": -1.06,
-    "median_reward": -1.06,
+    "mean_reward": -1.122,
+    "median_reward": -1.122,
     "stdev_reward": 0.0,
     "success_rate": 0.0,
     "pass_at_3": 0.0,
     "pass_at_5": 0.0,
-    "mean_turns": 3.0
+    "mean_turns": 3.0,
+    "mean_calibration": -0.062000000000000034
   }
 ]

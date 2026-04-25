@@ -47,6 +47,37 @@ def test_parse_end_task():
     )
     assert isinstance(act.body, EndTaskAction)
     assert act.body.success_claim is True
+    # Confidence defaults to 'medium' for backward compat with pre-Phase-1 callers.
+    assert act.body.confidence == "medium"
+
+
+def test_parse_end_task_with_confidence():
+    """Phase 1: end_task accepts a confidence ∈ {low, medium, high}."""
+    for level in ("low", "medium", "high"):
+        act = PhonePilotAction.model_validate(
+            {"body": {
+                "tool": "end_task",
+                "success_claim": False,
+                "summary": "couldn't reach",
+                "confidence": level,
+            }}
+        )
+        assert isinstance(act.body, EndTaskAction)
+        assert act.body.confidence == level
+
+
+def test_rejects_invalid_confidence_value():
+    """Phase 1: confidence must be one of low/medium/high; 'sure' or 0.9 should reject."""
+    for bad in ("sure", "very_high", "0.9", "", 0.9):
+        with pytest.raises(ValidationError):
+            PhonePilotAction.model_validate(
+                {"body": {
+                    "tool": "end_task",
+                    "success_claim": True,
+                    "summary": "done",
+                    "confidence": bad,
+                }}
+            )
 
 
 def test_rejects_unknown_tool():

@@ -97,6 +97,7 @@ def random_policy(obs: PhonePilotObservation, rng: random.Random) -> dict:
     elif tool == "end_task":
         body["success_claim"] = rng.random() < 0.5
         body["summary"] = "attempted the task"
+        body["confidence"] = rng.choice(["low", "medium", "high"])
     return {"body": body}
 
 
@@ -118,6 +119,7 @@ def scripted_easy_policy(obs: PhonePilotObservation, rng: random.Random) -> dict
             "tool": "end_task",
             "success_claim": True,
             "summary": "WhatsApped Ria to say I'd be 10 min late to our 4pm meeting.",
+            "confidence": "high",  # we did the work and waited for delivery
         }
     }
 
@@ -178,6 +180,12 @@ def run_episode(
         if obs.done:
             break
 
+    # Find the confidence emitted in end_task, if any (Phase-2 schema).
+    end_action = next(
+        (a for a in env.state.action_history if a.tool == "end_task"), None
+    )
+    end_confidence = end_action.args.get("confidence") if end_action else None
+
     return {
         "task_id": task_id,
         "policy": policy_name,
@@ -188,6 +196,7 @@ def run_episode(
         "terminated": env.state.terminated,
         "end_claim": env.state.end_task_success_claim,
         "end_summary": env.state.end_task_summary,
+        "end_confidence": end_confidence,
         "steps": steps,
     }
 

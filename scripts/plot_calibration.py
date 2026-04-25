@@ -41,9 +41,19 @@ from phonepilot_env.tasks import TASK_REGISTRY  # noqa: E402
 JSONL_RE = re.compile(r"^(?P<baseline>[a-zA-Z0-9_]+)_(?P<task>[a-zA-Z0-9_]+)\.jsonl$")
 
 
-def _collect() -> dict[str, dict[str, float]]:
-    """Walk data/eval/*.jsonl and aggregate (claimed, actual) per baseline."""
+def _collect() -> tuple[
+    dict[str, dict[str, float]],
+    dict[str, dict[str, dict[str, float]]],  # baseline → bucket → {claim_rate, actual_rate, n}
+]:
+    """Walk data/eval/*.jsonl and aggregate (claimed, actual) per baseline.
+
+    Returns a tuple ``(per_baseline, per_baseline_per_bucket)`` where the second
+    dict facets the same data by the agent's emitted confidence bucket.
+    """
     by_baseline: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
+    by_baseline_bucket: dict[str, dict[str, list[tuple[bool, bool]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for f in EVAL_DIR.glob("*.jsonl"):
         m = JSONL_RE.match(f.name)
         if not m:
@@ -55,7 +65,6 @@ def _collect() -> dict[str, dict[str, float]]:
         if task_id not in TASK_REGISTRY:
             # Fall back: maybe the baseline name itself contains underscores. Try the
             # longest task-id suffix that matches a known task.
-            suffix = task_id
             stem_parts = (baseline + "_" + task_id).split("_")
             for i in range(1, len(stem_parts)):
                 cand = "_".join(stem_parts[i:])
@@ -65,7 +74,6 @@ def _collect() -> dict[str, dict[str, float]]:
                     break
             else:
                 continue
-            suffix  # silence unused
         for line in f.read_text().splitlines():
             line = line.strip()
             if not line:
@@ -81,22 +89,28 @@ def _collect() -> dict[str, dict[str, float]]:
             )
             actual = goal_sum >= 0.75
             by_baseline[baseline].append((claimed, actual))
+            # Faceted aggregation by confidence bucket. Episodes that never ended
+            # (no end_task) get bucketed into "no_end".
+            bucket = row.get("end_confidence") or "no_end"
+            by_baseline_bucket[baseline][bucket].append((claimed, actual))
 
-    rates: dict[str, dict[str, float]] = {}
-    for baseline, pairs in by_baseline.items():
-        if not pairs:
-            continue
+    def _summarize(pairs: list[tuple[bool, bool]]) -> dict[str, float]:
         n = len(pairs)
-        claim_rate = sum(1 for c, _ in pairs if c) / n
-        actual_rate = sum(1 for _, a in pairs if a) / n
-        rates[baseline] = {
+        if n == 0:
+            return {"n_episodes": 0, "claim_rate": 0.0, "actual_rate": 0.0, "calibration_gap": 0.0}
+        return {
             "n_episodes": n,
-            "claim_rate": claim_rate,
-            "actual_rate": actual_rate,
-            # Sign of (claim_rate - actual_rate): positive = lying, negative = under-claiming
-            "calibration_gap": claim_rate - actual_rate,
+            "claim_rate": sum(1 for c, _ in pairs if c) / n,
+            "actual_rate": sum(1 for _, a in pairs if a) / n,
+            "calibration_gap": (sum(1 for c, _ in pairs if c) - sum(1 for _, a in pairs if a)) / n,
         }
-    return rates
+
+    rates = {b: _summarize(pairs) for b, pairs in by_baseline.items() if pairs}
+    rates_by_bucket = {
+        b: {bucket: _summarize(pairs) for bucket, pairs in buckets.items() if pairs}
+        for b, buckets in by_baseline_bucket.items()
+    }
+    return rates, rates_by_bucket
 
 
 def _plot(rates: dict[str, dict[str, float]], out_path: Path) -> None:
@@ -159,12 +173,75 @@ def _plot(rates: dict[str, dict[str, float]], out_path: Path) -> None:
         )
 
 
+def _plot_facets_by_confidence(
+    rates_by_bucket: dict[str, dict[str, dict[str, float]]],
+    out_path: Path,
+) -> None:
+    """Three-panel calibration plot: low / medium / high confidence buckets.
+
+    Each panel shows claimed-vs-actual per baseline, restricted to episodes where
+    the agent emitted that confidence bucket. A well-calibrated agent's point should
+    move toward the diagonal as confidence increases.
+    """
+    import matplotlib.pyplot as plt
+
+    if not rates_by_bucket:
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.text(
+            0.5, 0.5,
+            "No bucketed data found.\nRun eval.py with confidence-aware policies.",
+            ha="center", va="center", fontsize=12, transform=ax.transAxes,
+        )
+        ax.axis("off")
+        fig.savefig(out_path, dpi=120)
+        plt.close(fig)
+        print(f"wrote placeholder {out_path}")
+        return
+
+    palette = {
+        "random": "#bbbbbb", "null": "#999999", "scripted_easy": "#7aa6ff",
+        "base": "#a071c8", "sft": "#f2a65a", "trained": "#2ecc71",
+    }
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.5), sharex=True, sharey=True)
+    for ax, bucket in zip(axes, ["low", "medium", "high"]):
+        ax.plot([0, 1], [0, 1], color="#888", linestyle="--", linewidth=1.0)
+        ax.fill_between([0, 1], [0, 1], [1, 1], color="#d9534f", alpha=0.06)
+        ax.fill_between([0, 1], [0, 0], [0, 1], color="#1f77b4", alpha=0.04)
+        for baseline, buckets in sorted(rates_by_bucket.items()):
+            if bucket not in buckets:
+                continue
+            r = buckets[bucket]
+            color = palette.get(baseline, "#444")
+            ax.scatter([r["actual_rate"]], [r["claim_rate"]], s=140, color=color,
+                       edgecolor="white", linewidth=1.0, zorder=5)
+            ax.annotate(baseline, (r["actual_rate"], r["claim_rate"]),
+                        xytext=(6, 4), textcoords="offset points", fontsize=8)
+        ax.set_title(f"confidence = {bucket!r}")
+        ax.set_xlim(-0.05, 1.05)
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(alpha=0.2)
+    axes[0].set_ylabel("Claimed success rate")
+    for ax in axes:
+        ax.set_xlabel("Actual success rate")
+    fig.suptitle("PhonePilot — calibration faceted by emitted confidence bucket", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"wrote {out_path}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--out", default=str(PLOTS_DIR / "calibration.png"))
+    p.add_argument(
+        "--out-facets",
+        default=str(PLOTS_DIR / "calibration_by_confidence.png"),
+        help="Faceted plot showing calibration per confidence bucket (Axis 3).",
+    )
     args = p.parse_args()
-    rates = _collect()
+    rates, rates_by_bucket = _collect()
     _plot(rates, Path(args.out))
+    _plot_facets_by_confidence(rates_by_bucket, Path(args.out_facets))
     return 0
 
 

@@ -110,6 +110,7 @@ class PhonePilotState(State):
             "efficiency": 0.0,
             "appropriateness": 0.0,
             "format": 0.0,
+            "calibration": 0.0,
         }
     )
 

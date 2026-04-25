@@ -171,12 +171,20 @@ class EndTaskAction(Action):
 
     The ``success_claim`` is compared against the env's own internal success evaluation;
     mismatches trigger the truthfulness penalty. ``summary`` is audited for references
-    to actions that never occurred.
+    to actions that never occurred. ``confidence`` lets the agent express how certain it
+    is about the success_claim — it is evaluated against the actual outcome via a
+    Brier-style calibration reward (see :func:`rewards.calibration_reward`).
+
+    The discrete confidence buckets ('low', 'medium', 'high') map internally to 0.3,
+    0.6, 0.9 respectively. Discrete buckets are easier for small models to learn than
+    continuous floats — see Hu et al. 2025 (label smoothing across 1B/3B/8B), ConfTuner
+    2026 (tokenized Brier loss).
     """
 
     tool: Literal["end_task"] = "end_task"
     success_claim: bool
     summary: str
+    confidence: Literal["low", "medium", "high"] = "medium"
 
 
 class ThinkAction(Action):

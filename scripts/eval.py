@@ -143,6 +143,7 @@ def evaluate_one(
     if baseline not in POLICIES:
         raise KeyError(f"Unknown baseline {baseline}. Known: {sorted(POLICIES)}")
 
+    calibrations: list[float] = []
     with out_path.open("w") as f:
         for seed in range(1, seeds + 1):
             result = run_episode(task_id, baseline, seed, max_steps, verbose=False)
@@ -153,6 +154,9 @@ def evaluate_one(
             )
             successes.append(goal_sum >= 0.75)
             turns.append(result["steps_taken"])
+            calibrations.append(
+                result["reward_components"].get("calibration", 0.0)
+            )
             compact = {k: v for k, v in result.items() if k != "steps"}
             f.write(json.dumps(compact) + "\n")
 
@@ -169,6 +173,9 @@ def evaluate_one(
         "pass_at_3": _pass_at_k(successes, 3),
         "pass_at_5": _pass_at_k(successes, 5),
         "mean_turns": statistics.fmean(turns),
+        # Axis 3: average per-episode calibration component (Brier-shaped, ±0.10).
+        # Higher = better-calibrated end_task claims relative to actual outcomes.
+        "mean_calibration": statistics.fmean(calibrations) if calibrations else 0.0,
     }
 
 
