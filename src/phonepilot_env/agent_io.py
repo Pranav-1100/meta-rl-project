@@ -130,6 +130,72 @@ TOOL_LIST_INLINE = ", ".join(TOOL_NAMES)
 
 
 # ---------------------------------------------------------------------------
+# Chat-template wrapper — handles models that lack a "system" role
+# ---------------------------------------------------------------------------
+
+
+def build_chat_prompt(tokenizer: Any, user_text: str) -> str:
+    """Render SYSTEM_PROMPT + user_text using the tokenizer's chat template.
+
+    Some model families (notably Gemma 2 / 3) do not include a "system" role in
+    their chat template — calling ``apply_chat_template`` with a system message
+    raises ``TemplateError: System role not supported``. We catch that and fall
+    back to prepending SYSTEM_PROMPT to the user message, which works universally.
+
+    Args:
+        tokenizer: any HuggingFace tokenizer (PreTrainedTokenizer or PreTrainedTokenizerFast).
+        user_text: the per-turn user text — typically ``observation_to_prompt(obs)``.
+
+    Returns:
+        A single string ready to be passed to ``tokenizer(...)`` or to the model's
+        generate() call directly.
+    """
+    try:
+        return tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        # Gemma-style fallback: no system role supported. Merge into the user turn.
+        merged = f"{SYSTEM_PROMPT}\n\n---\n\n{user_text}"
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": merged}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+
+def messages_for_template(tokenizer: Any, messages: list[dict]) -> list[dict]:
+    """Adapt a multi-turn ``messages`` list to the tokenizer's chat-template
+    constraints. Used for SFT data where the trajectory contains
+    ``system + user + assistant + user + ...`` turns.
+
+    On models like Gemma 2/3 that don't support the system role, merges the
+    system message into the first user turn. Otherwise returns the list unchanged.
+    """
+    try:
+        tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        return messages
+    except Exception:
+        if not messages:
+            return messages
+        if messages[0].get("role") != "system":
+            return messages
+        system_content = messages[0]["content"]
+        rest = list(messages[1:])
+        if rest and rest[0].get("role") == "user":
+            rest[0] = {
+                "role": "user",
+                "content": f"{system_content}\n\n---\n\n{rest[0]['content']}",
+            }
+        return rest
+
+
+# ---------------------------------------------------------------------------
 # Observation → text
 # ---------------------------------------------------------------------------
 

@@ -62,7 +62,7 @@ def main() -> int:
     from trl import GRPOConfig, GRPOTrainer  # type: ignore[import-not-found]
     from datasets import Dataset  # type: ignore[import-not-found]
 
-    from phonepilot_env.agent_io import SYSTEM_PROMPT, observation_to_prompt
+    from phonepilot_env.agent_io import build_chat_prompt, observation_to_prompt
     from phonepilot_env.env import build_env
     from phonepilot_env.grpo_reward import rollout_reward
     from phonepilot_env.tasks import training_task_ids
@@ -109,13 +109,7 @@ def main() -> int:
         for seed in range(1, args.prompts_per_task + 1):
             env = build_env()
             obs = env.reset(seed=seed, episode_id=f"smoke_{task_id}_{seed}", task_id=task_id)
-            prompt = tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": observation_to_prompt(obs, turn_index=0)},
-                ],
-                tokenize=False, add_generation_prompt=True,
-            )
+            prompt = build_chat_prompt(tokenizer, observation_to_prompt(obs, turn_index=0))
             rows.append({"prompt": prompt, "task_id": task_id, "seed": seed})
     dataset = Dataset.from_list(rows)
     print(f"  ✓ {len(rows)} prompts across {len(smoke_tasks)} tasks")
@@ -151,13 +145,7 @@ def main() -> int:
     FastLanguageModel.for_inference(model)
     env = build_env()
     obs = env.reset(seed=99, episode_id="smoke_post", task_id="easy_ria_late")
-    prompt = tokenizer.apply_chat_template(
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": observation_to_prompt(obs, turn_index=0)},
-        ],
-        tokenize=False, add_generation_prompt=True,
-    )
+    prompt = build_chat_prompt(tokenizer, observation_to_prompt(obs, turn_index=0))
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     out = model.generate(**inputs, max_new_tokens=200, do_sample=False)
     completion = tokenizer.decode(

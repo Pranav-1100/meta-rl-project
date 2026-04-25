@@ -41,6 +41,8 @@ from phonepilot_env.agent_io import (  # noqa: E402
     SYSTEM_PROMPT,
     AgentParseError,
     action_to_completion,
+    build_chat_prompt,
+    messages_for_template,
     observation_to_prompt,
     parse_completion_to_action,
 )
@@ -155,8 +157,11 @@ model = FastLanguageModel.get_peft_model(
 
 # %%
 # Convert each episode's messages -> a single chat-formatted training example.
+# `messages_for_template` adapts the messages list for tokenizers without a system
+# role (Gemma 2/3) by merging the system message into the first user turn.
 def to_chat_example(row):
-    return {"text": tokenizer.apply_chat_template(row["messages"], tokenize=False)}
+    msgs = messages_for_template(tokenizer, row["messages"])
+    return {"text": tokenizer.apply_chat_template(msgs, tokenize=False)}
 
 train_ds = ds.map(to_chat_example, remove_columns=[c for c in ds.column_names if c != "messages"])
 print(train_ds[0]["text"][:400])
@@ -203,11 +208,7 @@ _drive_mirror(Path(SFT_LORA_DIR))
 FastLanguageModel.for_inference(model)
 env = build_env()
 obs = env.reset(seed=1, episode_id="sft_check", task_id="easy_ria_late")
-prompt = tokenizer.apply_chat_template(
-    [{"role": "system", "content": SYSTEM_PROMPT},
-     {"role": "user", "content": observation_to_prompt(obs)}],
-    tokenize=False, add_generation_prompt=True,
-)
+prompt = build_chat_prompt(tokenizer, observation_to_prompt(obs))
 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 out = model.generate(**inputs, max_new_tokens=200, do_sample=False)
 completion = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
@@ -279,11 +280,7 @@ def _run_full_episode(task_id: str, seed: int, max_turns: int = EVAL_MAX_STEPS) 
     env = build_env()
     obs = env.reset(seed=seed, episode_id=f"eval_{task_id}_{seed}", task_id=task_id)
     for turn in range(max_turns):
-        prompt = tokenizer.apply_chat_template(
-            [{"role": "system", "content": SYSTEM_PROMPT},
-             {"role": "user", "content": observation_to_prompt(obs, turn_index=turn)}],
-            tokenize=False, add_generation_prompt=True,
-        )
+        prompt = build_chat_prompt(tokenizer, observation_to_prompt(obs, turn_index=turn))
         completion = _greedy_completion(prompt)
         try:
             action = parse_completion_to_action(completion)
@@ -395,11 +392,7 @@ def build_prompt_dataset(task_mix: list[str], n_per_task: int):
         for seed in range(1, n_per_task + 1):
             env = build_env()
             obs = env.reset(seed=seed, episode_id=f"rollout_{task_id}_{seed}", task_id=task_id)
-            prompt = tokenizer.apply_chat_template(
-                [{"role": "system", "content": SYSTEM_PROMPT},
-                 {"role": "user", "content": observation_to_prompt(obs)}],
-                tokenize=False, add_generation_prompt=True,
-            )
+            prompt = build_chat_prompt(tokenizer, observation_to_prompt(obs))
             rows.append({"prompt": prompt, "task_id": task_id, "seed": seed})
     return Dataset.from_list(rows)
 
