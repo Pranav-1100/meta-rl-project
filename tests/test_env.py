@@ -23,7 +23,7 @@ def test_reset_returns_initial_obs():
     assert obs.time_budget_remaining_min == 60
     assert obs.done is False
     assert obs.reward is None
-    assert len(obs.available_tools) == 18
+    assert len(obs.available_tools) == 23
 
 
 def test_reset_unknown_task_raises():

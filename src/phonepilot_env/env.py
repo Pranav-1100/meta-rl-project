@@ -22,8 +22,10 @@ from typing import Any
 
 from openenv.core import Environment
 
+from .drama import DramaConfig, make_default_drama_config, maybe_fire_drama
 from .actions import (
     CalendarAddAction,
+    CalendarRescheduleAction,
     CalendarViewAction,
     CallAction,
     EndTaskAction,
@@ -33,8 +35,12 @@ from .actions import (
     PhonePilotAction,
     ReadMessagesAction,
     ReadNotificationsAction,
+    SendEmailAction,
     SendSMSAction,
     SendWhatsAppAction,
+    SwiggyOpenAction,
+    SwiggyOrderAction,
+    SwiggySearchAction,
     ThinkAction,
     WaitAction,
     WebSearchAction,
@@ -45,9 +51,13 @@ from .actions import (
 )
 from .apps import (
     calendar_add,
+    calendar_reschedule,
     calendar_view,
     maps_search,
     maps_travel_time,
+    swiggy_open,
+    swiggy_order,
+    swiggy_search,
     web_search,
     zomato_open,
     zomato_order,
@@ -83,6 +93,8 @@ class PhonePilotEnvironment(
         self._state: PhonePilotState = PhonePilotState()
         self._task: Task = get_task(default_task_id())
         self._rng: random.Random = random.Random(0)
+        self._drama: DramaConfig = DramaConfig(enabled=False)
+        self._drama_notes: list[str] = []  # surfaces in observation.notifications when fired
 
     # ------------------------------------------------------------------ state
 
@@ -111,6 +123,12 @@ class PhonePilotEnvironment(
         )
         # Task-specific seeding (calendar entries, pre-existing messages, etc).
         self._task.seed_state(self._state)
+        # Drama config — opt-in per task.
+        if self._task.use_drama:
+            self._drama = make_default_drama_config(self._rng)
+        else:
+            self._drama = DramaConfig(enabled=False)
+        self._drama_notes = []
 
         return self._build_observation(newly_delivered=[], last_outcome=None, format_error=None)
 
@@ -123,6 +141,12 @@ class PhonePilotEnvironment(
         **kwargs: Any,
     ) -> PhonePilotObservation:
         self._state.step_count += 1
+
+        # Drama injector — fires at most one event per step (and at most one event of each
+        # kind per episode). Fired events become notifications surfaced to the agent.
+        drama_msg = maybe_fire_drama(self._state, self._drama, self._rng, self._state.step_count)
+        if drama_msg:
+            self._drama_notes.append(drama_msg)
 
         # Dispatch to handler. Format errors shouldn't happen here because Pydantic
         # already validated at the server boundary, but we guard anyway.
@@ -199,6 +223,8 @@ class PhonePilotEnvironment(
             return self._do_send(sub.contact, sub.text, channel="whatsapp")
         if isinstance(sub, SendSMSAction):
             return self._do_send(sub.contact, sub.text, channel="sms")
+        if isinstance(sub, SendEmailAction):
+            return self._do_send_email(sub)
         if isinstance(sub, ReadMessagesAction):
             return self._do_read_messages(sub.contact, sub.channel)
         if isinstance(sub, ReadNotificationsAction):
@@ -207,12 +233,20 @@ class PhonePilotEnvironment(
             return self._do_calendar_view(sub.date)
         if isinstance(sub, CalendarAddAction):
             return self._do_calendar_add(sub)
+        if isinstance(sub, CalendarRescheduleAction):
+            return self._do_calendar_reschedule(sub)
         if isinstance(sub, ZomatoSearchAction):
             return self._do_zomato_search(sub)
         if isinstance(sub, ZomatoOpenAction):
             return self._do_zomato_open(sub.restaurant_id)
         if isinstance(sub, ZomatoOrderAction):
             return self._do_zomato_order(sub)
+        if isinstance(sub, SwiggySearchAction):
+            return self._do_swiggy_search(sub)
+        if isinstance(sub, SwiggyOpenAction):
+            return self._do_swiggy_open(sub.restaurant_id)
+        if isinstance(sub, SwiggyOrderAction):
+            return self._do_swiggy_order(sub)
         if isinstance(sub, MapsSearchAction):
             return f"places={maps_search(query=sub.query)}", 1
         if isinstance(sub, MapsTravelTimeAction):
@@ -291,6 +325,23 @@ class PhonePilotEnvironment(
         schedule_reply(self._state, self._state.contacts[contact], channel, text, self._rng)
         return f"sent {channel} to {contact}: {text[:80]}", 1
 
+    def _do_send_email(self, a: SendEmailAction) -> tuple[str, int]:
+        """Email is just a slower text channel — same simulator path, longer reply window."""
+        self._require_contact(a.contact)
+        now = self._state.current_time_min
+        body_with_subject = f"Subject: {a.subject}\n\n{a.body}"
+        self._state.messages.append(
+            MessageEvent(
+                sender="user",
+                recipient=a.contact,
+                channel="email",
+                text=body_with_subject,
+                sent_at_min=now,
+            )
+        )
+        schedule_reply(self._state, self._state.contacts[a.contact], "email", a.body, self._rng)
+        return f"sent email to {a.contact}: {a.subject[:60]}", 1
+
     def _do_read_messages(self, contact: str | None, channel: str | None) -> tuple[str, int]:
         filtered = self._state.messages
         if contact:
@@ -339,6 +390,14 @@ class PhonePilotEnvironment(
             raise ValueError(result.get("error", "calendar_add failed"))
         return f"added event {result['event_id']!r}: {a.title} @ {result['start']}", 1
 
+    def _do_calendar_reschedule(self, a: CalendarRescheduleAction) -> tuple[str, int]:
+        result = calendar_reschedule(
+            self._state, event_id=a.event_id, new_start_time=a.new_start_time
+        )
+        if result.get("view") == "error":
+            raise ValueError(result.get("error", "calendar_reschedule failed"))
+        return f"rescheduled {a.event_id} → {result['new_start']}", 1
+
     def _do_zomato_search(self, a: ZomatoSearchAction) -> tuple[str, int]:
         view = zomato_search(
             query=a.query,
@@ -369,6 +428,39 @@ class PhonePilotEnvironment(
             raise ValueError(result.get("error", f"Unknown restaurant_id {a.restaurant_id!r}"))
         return (
             f"order {result['order_id']!r} placed at {a.restaurant_id} ({a.delivery_time})",
+            2,
+        )
+
+    def _do_swiggy_search(self, a: SwiggySearchAction) -> tuple[str, int]:
+        view = swiggy_search(
+            query=a.query,
+            cuisine=a.cuisine,
+            veg_only=a.veg_only,
+            max_price_per_person=a.max_price_per_person,
+        )
+        hits = view.get("results", [])
+        if not hits:
+            return "(no swiggy restaurants matched)", 1
+        compact = [(r["restaurant_id"], r["name"], r["location"], r["price_per_person"]) for r in hits]
+        return f"results={compact}", 1
+
+    def _do_swiggy_open(self, restaurant_id: str) -> tuple[str, int]:
+        detail = swiggy_open(restaurant_id=restaurant_id)
+        if detail.get("view") == "error":
+            raise ValueError(detail.get("error", f"Unknown restaurant_id {restaurant_id!r}"))
+        return f"opened {detail['name']}; menu={detail['menu']}", 1
+
+    def _do_swiggy_order(self, a: SwiggyOrderAction) -> tuple[str, int]:
+        result = swiggy_order(
+            self._state,
+            restaurant_id=a.restaurant_id,
+            items=list(a.items),
+            delivery_time=a.delivery_time,
+        )
+        if result.get("view") == "error":
+            raise ValueError(result.get("error", f"Unknown restaurant_id {a.restaurant_id!r}"))
+        return (
+            f"swiggy order {result['order_id']!r} at {a.restaurant_id} ({a.delivery_time})",
             2,
         )
 
@@ -438,6 +530,18 @@ class PhonePilotEnvironment(
             for m in newly_delivered
             if m.sender != "user"
         ]
+        # Drama notifications — drained once they're surfaced.
+        for note in self._drama_notes:
+            notifs.append(
+                Notification(
+                    kind="system",
+                    channel="system",
+                    contact=None,
+                    preview=note,
+                    timestamp=self._state.clock_hhmm(),
+                )
+            )
+        self._drama_notes = []
         # Update watermark.
         if newly_delivered:
             self._state.delivered_notifications_after_min = max(

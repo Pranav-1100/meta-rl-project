@@ -52,6 +52,13 @@ class SendSMSAction(Action):
     text: str
 
 
+class SendEmailAction(Action):
+    tool: Literal["send_email"] = "send_email"
+    contact: str
+    subject: str
+    body: str
+
+
 class ReadMessagesAction(Action):
     tool: Literal["read_messages"] = "read_messages"
     contact: str | None = None
@@ -62,7 +69,7 @@ class ReadNotificationsAction(Action):
     tool: Literal["read_notifications"] = "read_notifications"
 
 
-# --- Calendar (2) ---
+# --- Calendar (3) ---
 
 
 class CalendarViewAction(Action):
@@ -76,6 +83,12 @@ class CalendarAddAction(Action):
     start_time: str = Field(description="ISO datetime or 'HH:MM' (assumed today)")
     duration_min: int = Field(default=60, ge=1, le=720)
     invitees: list[str] = Field(default_factory=list)
+
+
+class CalendarRescheduleAction(Action):
+    tool: Literal["calendar_reschedule"] = "calendar_reschedule"
+    event_id: str
+    new_start_time: str = Field(description="HH:MM (today) or 'tomorrow HH:MM' / 'YYYY-MM-DD HH:MM'.")
 
 
 # --- Zomato (3) ---
@@ -96,6 +109,29 @@ class ZomatoOpenAction(Action):
 
 class ZomatoOrderAction(Action):
     tool: Literal["zomato_order"] = "zomato_order"
+    restaurant_id: str
+    items: list[str]
+    delivery_time: str = Field(default="ASAP", description="'ASAP' or 'HH:MM'")
+
+
+# --- Swiggy (3) — mirror of Zomato. Different catalog so the agent has to compare. ---
+
+
+class SwiggySearchAction(Action):
+    tool: Literal["swiggy_search"] = "swiggy_search"
+    query: str
+    cuisine: str | None = None
+    veg_only: bool = False
+    max_price_per_person: int | None = None
+
+
+class SwiggyOpenAction(Action):
+    tool: Literal["swiggy_open"] = "swiggy_open"
+    restaurant_id: str
+
+
+class SwiggyOrderAction(Action):
+    tool: Literal["swiggy_order"] = "swiggy_order"
     restaurant_id: str
     items: list[str]
     delivery_time: str = Field(default="ASAP", description="'ASAP' or 'HH:MM'")
@@ -160,13 +196,18 @@ SUB_ACTION_CLASSES: tuple[type[Action], ...] = (
     HangUpAction,
     SendWhatsAppAction,
     SendSMSAction,
+    SendEmailAction,
     ReadMessagesAction,
     ReadNotificationsAction,
     CalendarViewAction,
     CalendarAddAction,
+    CalendarRescheduleAction,
     ZomatoSearchAction,
     ZomatoOpenAction,
     ZomatoOrderAction,
+    SwiggySearchAction,
+    SwiggyOpenAction,
+    SwiggyOrderAction,
     MapsSearchAction,
     MapsTravelTimeAction,
     WebSearchAction,
@@ -183,13 +224,18 @@ SubAction = Annotated[
         HangUpAction,
         SendWhatsAppAction,
         SendSMSAction,
+        SendEmailAction,
         ReadMessagesAction,
         ReadNotificationsAction,
         CalendarViewAction,
         CalendarAddAction,
+        CalendarRescheduleAction,
         ZomatoSearchAction,
         ZomatoOpenAction,
         ZomatoOrderAction,
+        SwiggySearchAction,
+        SwiggyOpenAction,
+        SwiggyOrderAction,
         MapsSearchAction,
         MapsTravelTimeAction,
         WebSearchAction,
@@ -224,13 +270,18 @@ __all__ = [
     "HangUpAction",
     "SendWhatsAppAction",
     "SendSMSAction",
+    "SendEmailAction",
     "ReadMessagesAction",
     "ReadNotificationsAction",
     "CalendarViewAction",
     "CalendarAddAction",
+    "CalendarRescheduleAction",
     "ZomatoSearchAction",
     "ZomatoOpenAction",
     "ZomatoOrderAction",
+    "SwiggySearchAction",
+    "SwiggyOpenAction",
+    "SwiggyOrderAction",
     "MapsSearchAction",
     "MapsTravelTimeAction",
     "WebSearchAction",

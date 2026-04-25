@@ -208,6 +208,30 @@ def calendar_add(
     }
 
 
+def calendar_reschedule(
+    state: "PhonePilotState",
+    *,
+    event_id: str,
+    new_start_time: str,
+) -> dict[str, Any]:
+    """Move an existing event to a new start time. Accepts 'HH:MM' (today),
+    'tomorrow HH:MM', or 'YYYY-MM-DD HH:MM'."""
+    target = next((e for e in state.calendar if e.event_id == event_id), None)
+    if target is None:
+        return {"app": "calendar", "view": "error", "error": f"unknown event_id {event_id!r}"}
+    new_min = _parse_hhmm(new_start_time.split(" ", 1)[-1] if " " in new_start_time else new_start_time)
+    if new_min is None:
+        return {"app": "calendar", "view": "error", "error": f"bad new_start_time {new_start_time!r}"}
+    target.start_min = new_min
+    return {
+        "app": "calendar",
+        "view": "event_rescheduled",
+        "event_id": event_id,
+        "new_start": _min_to_hhmm(new_min),
+        "raw_request": new_start_time,
+    }
+
+
 def _parse_hhmm(s: str) -> int | None:
     """Accept 'HH:MM' or '7pm' / '7:30pm' variants. Returns minutes-of-day, or None."""
     s = s.strip().lower().replace(" ", "")
@@ -239,6 +263,139 @@ def _parse_hhmm(s: str) -> int | None:
 def _min_to_hhmm(total: int) -> str:
     total %= 24 * 60
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Swiggy — mirror of Zomato with a slightly different catalog.
+# ---------------------------------------------------------------------------
+
+_SWIGGY_CATALOG: dict[str, dict[str, Any]] = {
+    "sw_kyoto": {
+        "name": "Kyoto Sushi Lounge",
+        "cuisine": "Japanese",
+        "location": "HSR Layout",
+        "price_per_person": 720,  # cheaper than Zomato's z_sushi_haven (850)
+        "veg_options": True,
+        "rating": 4.4,
+        "menu": {
+            "Veg Maki Combo": 380,
+            "Salmon Sashimi (8pc)": 640,
+            "Edamame": 160,
+            "Miso Soup": 110,
+            "Veg Roll Platter": 420,
+        },
+    },
+    "sw_napoli": {
+        "name": "Napoli Express",
+        "cuisine": "Italian",
+        "location": "Indiranagar",
+        "price_per_person": 580,
+        "veg_options": True,
+        "rating": 4.1,
+        "menu": {"Margherita": 420, "Funghi": 480, "Garlic Knots": 160},
+    },
+    "sw_thalapakatti": {
+        "name": "Thalapakatti Biryani",
+        "cuisine": "Indian",
+        "location": "Koramangala",
+        "price_per_person": 290,
+        "veg_options": True,
+        "rating": 4.2,
+        "menu": {"Veg Biryani": 240, "Chicken Biryani": 290, "Mutton Biryani": 380},
+    },
+    "sw_freshmenu": {
+        "name": "FreshMenu Bowls",
+        "cuisine": "Healthy",
+        "location": "Whitefield",
+        "price_per_person": 380,
+        "veg_options": True,
+        "rating": 4.0,
+        "menu": {"Buddha Bowl": 360, "Chicken Quinoa Bowl": 410, "Watermelon Salad": 220},
+    },
+}
+
+
+def swiggy_search(
+    *,
+    query: str,
+    cuisine: str | None,
+    veg_only: bool,
+    max_price_per_person: int | None,
+) -> dict[str, Any]:
+    q = query.lower()
+    results = []
+    for rid, r in _SWIGGY_CATALOG.items():
+        if cuisine and r["cuisine"].lower() != cuisine.lower():
+            continue
+        if veg_only and not r["veg_options"]:
+            continue
+        if max_price_per_person is not None and r["price_per_person"] > max_price_per_person:
+            continue
+        if q and not any(tok in r["name"].lower() or tok in r["cuisine"].lower() for tok in q.split()):
+            continue
+        results.append(
+            {
+                "restaurant_id": rid,
+                "name": r["name"],
+                "cuisine": r["cuisine"],
+                "location": r["location"],
+                "price_per_person": r["price_per_person"],
+                "veg_options": r["veg_options"],
+                "rating": r["rating"],
+            }
+        )
+    return {"app": "swiggy", "view": "search_results", "query": query, "results": results}
+
+
+def swiggy_open(*, restaurant_id: str) -> dict[str, Any]:
+    r = _SWIGGY_CATALOG.get(restaurant_id)
+    if not r:
+        return {"app": "swiggy", "view": "error", "error": f"unknown restaurant {restaurant_id!r}"}
+    return {
+        "app": "swiggy",
+        "view": "restaurant",
+        "restaurant_id": restaurant_id,
+        "name": r["name"],
+        "cuisine": r["cuisine"],
+        "location": r["location"],
+        "price_per_person": r["price_per_person"],
+        "veg_options": r["veg_options"],
+        "rating": r["rating"],
+        "menu": r["menu"],
+    }
+
+
+def swiggy_order(
+    state: "PhonePilotState",
+    *,
+    restaurant_id: str,
+    items: list[str],
+    delivery_time: str,
+) -> dict[str, Any]:
+    r = _SWIGGY_CATALOG.get(restaurant_id)
+    if not r:
+        return {"app": "swiggy", "view": "error", "error": f"unknown restaurant {restaurant_id!r}"}
+    total = sum(r["menu"].get(item, 0) for item in items)
+    order_id = f"swo_{len(state.orders) + 1:03d}"
+    order = Order(
+        order_id=order_id,
+        restaurant_id=restaurant_id,
+        items=items,
+        delivery_time=delivery_time,
+        placed_at_min=state.current_time_min,
+        price_per_person=r["price_per_person"],
+    )
+    state.orders.append(order)
+    return {
+        "app": "swiggy",
+        "view": "order_confirmation",
+        "order_id": order_id,
+        "restaurant_id": restaurant_id,
+        "items": items,
+        "delivery_time": delivery_time,
+        "estimated_total": total,
+        "price_per_person": r["price_per_person"],
+    }
 
 
 # ---------------------------------------------------------------------------

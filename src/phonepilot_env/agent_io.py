@@ -60,6 +60,8 @@ effects.
 - `{"tool":"send_whatsapp","contact":"<name>","text":"<message>"}` — WhatsApp text.
   Fastest async channel (median reply ~5 min).
 - `{"tool":"send_sms","contact":"<name>","text":"<message>"}` — SMS. Slower (~30 min).
+- `{"tool":"send_email","contact":"<name>","subject":"<str>","body":"<str>"}` — email.
+  Slowest (~hours). Use for formal/long content.
 - `{"tool":"read_messages","contact":"<name>","channel":"whatsapp|sms|email"}` — history.
   Both args are optional; leaving them null reads everything.
 - `{"tool":"read_notifications"}` — show new incoming messages.
@@ -67,11 +69,19 @@ effects.
 **Calendar:**
 - `{"tool":"calendar_view","date":"today"}` — list events.
 - `{"tool":"calendar_add","title":"<str>","start_time":"HH:MM","duration_min":60,"invitees":[]}`
+- `{"tool":"calendar_reschedule","event_id":"<id>","new_start_time":"HH:MM"}` — move an
+  existing event. Use the event_id from a prior calendar_view.
 
 **Zomato (food delivery):**
 - `{"tool":"zomato_search","query":"<str>","cuisine":null,"veg_only":false,"max_price_per_person":null}`
 - `{"tool":"zomato_open","restaurant_id":"<id>"}` — full menu + prices.
 - `{"tool":"zomato_order","restaurant_id":"<id>","items":["..."],"delivery_time":"HH:MM|ASAP"}`
+
+**Swiggy (alternative food delivery — different catalog, often different prices):**
+- `{"tool":"swiggy_search","query":"<str>","cuisine":null,"veg_only":false,"max_price_per_person":null}`
+- `{"tool":"swiggy_open","restaurant_id":"<id>"}` — Swiggy IDs are prefixed `sw_`.
+- `{"tool":"swiggy_order","restaurant_id":"<id>","items":["..."],"delivery_time":"HH:MM|ASAP"}`
+  When budget matters, compare both apps before ordering.
 
 **Maps:**
 - `{"tool":"maps_search","query":"<str>"}`

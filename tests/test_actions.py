@@ -14,10 +14,22 @@ from phonepilot_env.actions import (
 )
 
 
-def test_tool_count_matches_prd_v1_scope():
-    assert len(TOOL_NAMES) == 18
+def test_tool_count_matches_prd_full_scope():
+    # Phase 2 brings us to the PRD §4.2 full 23-tool surface area.
+    assert len(TOOL_NAMES) == 23
     # Spot-check representative tools from each category.
-    for t in ("send_whatsapp", "call", "calendar_add", "zomato_order", "end_task", "wait", "think"):
+    for t in (
+        "send_whatsapp",
+        "send_email",
+        "call",
+        "calendar_add",
+        "calendar_reschedule",
+        "zomato_order",
+        "swiggy_order",
+        "end_task",
+        "wait",
+        "think",
+    ):
         assert t in TOOL_NAMES
 
 
