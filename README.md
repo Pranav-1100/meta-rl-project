@@ -200,7 +200,7 @@ uv run python scripts/eval.py --baselines random null scripted_easy --seeds 15
 # After training:
 uv run python scripts/eval.py \
     --baselines random null base sft trained \
-    --base-model unsloth/gemma-3-1b-it \
+    --base-model unsloth/gemma-2-9b-it \
     --sft-model ./models/sft_lora \
     --trained-model ./models/grpo_lora \
     --seeds 50
@@ -269,7 +269,7 @@ meta-rl-project/
 │   ├── state.py              # hidden internal state
 │   ├── contacts.py           # simulator: pickup, reply scheduling, persona templates
 │   ├── apps.py               # Zomato / Swiggy / Maps / Calendar / WebSearch stubs
-│   ├── tasks.py              # 12 tasks (9 training + 3 adversarial held out)
+│   ├── tasks.py              # 17 tasks (9 training + 8 adversarial across 4 honesty axes)
 │   ├── rewards.py            # 5 reward components, incl. truthfulness anti-hack
 │   ├── env.py                # PhonePilotEnvironment — reset/step/state
 │   ├── agent_io.py           # LLM ↔ env contract: system prompt + obs→text + text→action
@@ -298,9 +298,9 @@ meta-rl-project/
 The full notebook is `notebooks/train_colab.py` — open it in Colab Pro, set runtime to GPU, run top-to-bottom. It covers:
 
 1. **Phase A — Setup.** Install Unsloth + TRL, clone this repo, load the synthetic trajectories from `data/trajectories/`.
-2. **Phase B — SFT warmup** on ~300 trajectories (training set only — adversarial battery held out). Unsloth `FastLanguageModel` (Gemma 3 1B on T4 / Qwen 2.5 3B on A100), LoRA rank 16, lr 2e-5, 2 epochs. Target: 95%+ schema-valid tool calls. `~30–60 min`.
+2. **Phase B — SFT warmup** on ~250 trajectories (training set only — adversarial battery held out). Unsloth `FastLanguageModel` with Gemma 2 9B 4-bit on A10G (or Qwen 2.5 7B fallback), LoRA rank 16, lr 2e-5, 2 epochs. Target: 95%+ schema-valid tool calls. `~2 hours on A10G`. Model size chosen per [Aug 2025 calibration research](https://arxiv.org/html/2508.00264v2) — Brier-style training is reliable at 8B+ and degraded at 1B/3B.
 3. **Phase C — Curriculum GRPO.** TRL `GRPOTrainer` with the reward function calling back into the env; rollout group size 6. Curriculum: Easy → +Medium → +Hard → +Complex/Composite/Recovery. Adversarial battery NEVER seen during training. `~4–8 hrs on A100`.
-4. **Phase D — 4-baseline eval + plots.** `scripts/eval.py` runs all 5 baselines (random / null / base / SFT / trained) across all 12 tasks. Produces `data/plots/staircase.png` + the lying-rate-over-training plot from the adversarial battery.
+4. **Phase D — 5-baseline eval + plots.** `scripts/eval.py` runs all 5 baselines (random / null / base / SFT / trained) across all 17 tasks. Produces `data/plots/staircase.png`, the lying-rate-over-training plot, calibration plot faceted by confidence bucket, capability dashboard, probes curve, and honesty-vs-capability 2-axis plot.
 5. **Phase E — Push artifacts** back into the repo (LoRA adapters + plots + trajectories) so the HF Space submission is reproducible.
 
 See `prd.md` §7 for the full training-pipeline spec and §8 for the "showing improvement" strategy.

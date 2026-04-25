@@ -4,7 +4,9 @@
 #   1. Upload it to Google Colab → File → Upload notebook → choose "Python file".
 #      Colab converts `# %%` markers into cells automatically.
 #      (Or: open in VSCode with the Jupyter extension, run cell-by-cell.)
-#   2. Set runtime to GPU (T4 is fine for Gemma 3 1B; A100 for Qwen 2.5 3B).
+#   2. Set runtime to GPU. A10G (24GB) or A100 (40GB) on HF Jobs — Gemma 2 9B
+#      with 4-bit + LoRA r=16 fits on A10G. T4 (12GB) is too tight for 9B, but
+#      Gemma 3 1B on T4 still works as a fast-iteration fallback.
 #   3. Run every cell top-to-bottom. Where a cell needs credentials or a path, a comment
 #      flags it.
 #
@@ -120,14 +122,19 @@ print("sample reward distribution:", [round(ds[i]["total_reward"], 2) for i in r
 # ...}}` JSON format. **We train only on assistant turns** (the losses are masked on user /
 # system turns). 1–2 epochs is enough; target format-validity ≥ 95%.
 #
-# **Model choice:** Gemma 3 1B is the safer pick for a T4; jump to Qwen 2.5 3B only if
-# the 1B run converges cleanly and we have time on an A100.
+# **Model choice:** Gemma 2 9B is our primary — research (Calibrated LMs Aug 2025)
+# shows Brier-style calibration training is reliable at 8B+ and degraded below.
+# Fits A10G with 4-bit + LoRA r=16 (~7GB VRAM). Fallback to Qwen 2.5 7B for slightly
+# faster iteration; fallback to Gemma 3 1B for free-T4 development only.
 
 # %%
 from unsloth import FastLanguageModel
 import torch
 
-BASE_MODEL = "unsloth/gemma-3-1b-it-unsloth-bnb-4bit"   # alt: "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
+BASE_MODEL = "unsloth/gemma-2-9b-it-bnb-4bit"   # primary; calibration-viable scale
+# alt fallbacks:
+#   "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"  (faster, slightly weaker for our domain)
+#   "unsloth/gemma-3-1b-it-unsloth-bnb-4bit"  (T4 free-tier dev only — Axis 3 will degrade)
 MAX_SEQ_LEN = 3072  # our episodes are short; this leaves headroom for the system prompt
 
 model, tokenizer = FastLanguageModel.from_pretrained(
