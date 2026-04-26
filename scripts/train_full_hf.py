@@ -79,12 +79,20 @@ def main() -> int:
     p.add_argument("--sft-lr", type=float, default=2e-5)
     p.add_argument("--max-grpo-steps", type=int, default=80)
     # num_generations must divide (batch_size * grad_accum * world_size).
-    # With per_device_batch_size=1, gradient_accumulation_steps=2, world=1 → 2.
-    # So num_generations=2 works; 4 would require grad_accum=4.
     p.add_argument("--grpo-num-generations", type=int, default=2)
     p.add_argument("--grpo-prompts-per-task", type=int, default=20)
+    p.add_argument("--grpo-temperature", type=float, default=0.7,
+                   help="Lower=more focused (less garbage). Default GRPO=1.0 produces wild outputs.")
+    p.add_argument("--grpo-max-completion-length", type=int, default=400,
+                   help="Token budget per rollout. 200 was too tight for full JSON.")
     p.add_argument("--skip-sft", action="store_true")
     p.add_argument("--skip-grpo", action="store_true")
+    p.add_argument(
+        "--load-sft-from",
+        default=None,
+        help="HF Hub repo containing an existing sft_lora/ adapter. If set, "
+        "downloads + loads it instead of training fresh SFT. Auto-sets --skip-sft.",
+    )
     args = p.parse_args()
 
     # ---------------------------------------------------------------- repo clone
@@ -153,18 +161,35 @@ def main() -> int:
     model = prepare_model_for_kbit_training(model)
 
     # ---------------------------------------------------------------- attach LoRA
-    print(f"[lora] attaching adapters (r={args.lora_r})...")
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_r,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.0,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, lora_config)
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[lora] {n_trainable:,} trainable params")
+    if args.load_sft_from:
+        print(f"[lora] loading existing SFT adapter from {args.load_sft_from}/sft_lora")
+        from huggingface_hub import snapshot_download
+        from peft import PeftModel
+        adapter_root = snapshot_download(
+            repo_id=args.load_sft_from, allow_patterns="sft_lora/*"
+        )
+        sft_path = Path(adapter_root) / "sft_lora"
+        model = PeftModel.from_pretrained(model, str(sft_path), is_trainable=True)
+        # Ensure adapter parameters require gradients (PEFT sometimes loads with grads off).
+        for n, p_ in model.named_parameters():
+            if "lora_" in n:
+                p_.requires_grad = True
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[lora] loaded SFT adapter — {n_trainable:,} trainable params")
+        args.skip_sft = True
+    else:
+        print(f"[lora] attaching adapters (r={args.lora_r})...")
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_r,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.0,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
+        n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[lora] {n_trainable:,} trainable params")
 
     # =================================================================
     #                            PHASE B — SFT
@@ -286,14 +311,17 @@ def main() -> int:
         grpo_dataset = Dataset.from_list(rows)
         print(f"[grpo] {len(rows)} prompts ready")
 
-        # GRPO config — Stage 1: Easy only, modest steps to fit budget
+        # GRPO config — Stage 1: Easy only. Temperature lowered + completion length raised
+        # to avoid the all-rewards-equal-floor degenerate regime we saw with defaults.
         grpo_args = GRPOConfig(
             output_dir="/tmp/grpo-out",
             per_device_train_batch_size=1,
             gradient_accumulation_steps=2,
             num_generations=args.grpo_num_generations,
-            max_prompt_length=args.max_seq_len - 256,
-            max_completion_length=200,
+            max_prompt_length=args.max_seq_len - args.grpo_max_completion_length,
+            max_completion_length=args.grpo_max_completion_length,
+            temperature=args.grpo_temperature,
+            top_p=0.9,
             learning_rate=1e-6,
             logging_steps=1,
             save_strategy="no",
