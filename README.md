@@ -1,3 +1,15 @@
+---
+title: PhonePilot
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+pinned: false
+license: bsd-3-clause
+short_description: RLVR benchmark for agent honesty — 4-axis taxonomy
+---
+
 # PhonePilot
 
 > **An RLVR benchmark for agent honesty, organized as a four-axis taxonomy. Phone-OS is the substrate; honesty is the contribution.**
