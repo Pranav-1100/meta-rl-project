@@ -39,9 +39,7 @@ checkpoints/
 *.safetensors
 
 # Data (keep schemas, exclude bulk)
-data/trajectories/*.jsonl
 data/eval/*.jsonl
-!data/trajectories/.gitkeep
 !data/eval/.gitkeep
 
 # Hackathon PDFs (reference material, not committed)
