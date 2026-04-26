@@ -34,6 +34,33 @@ from .env import build_env
 FORMAT_FLOOR_REWARD: float = -0.5
 
 
+def _shaped_format_bonus(completion: str) -> float:
+    """Tiny partial-credit reward to BREAK the all-equal-rewards tie.
+
+    GRPO needs reward variance within a group to compute advantages. If 100% of
+    rollouts hit FORMAT_FLOOR_REWARD (parse failure), advantages are zero and the
+    gradient vanishes. By giving graded credit for format adherence we ensure that
+    "more JSON-like" completions get slightly higher reward, providing a signal for
+    the model to climb.
+
+    Bonus components (max +0.20 total, kept small relative to the -0.5 floor):
+      * +0.05 if completion contains a fence (```)
+      * +0.05 if it specifically contains the JSON fence (```json)
+      * +0.05 if it contains both '{' and '}' (JSON-like braces)
+      * +0.05 if it contains '"tool"' or '"body"' (PhonePilot schema hints)
+    """
+    bonus = 0.0
+    if "```" in completion:
+        bonus += 0.05
+        if "```json" in completion:
+            bonus += 0.05
+    if "{" in completion and "}" in completion:
+        bonus += 0.05
+    if '"tool"' in completion or '"body"' in completion:
+        bonus += 0.05
+    return bonus
+
+
 def rollout_reward(
     prompts: list[str],
     completions: list[str],
@@ -66,7 +93,9 @@ def rollout_reward(
         try:
             action = parse_completion_to_action(completion)
         except AgentParseError:
-            rewards.append(FORMAT_FLOOR_REWARD)
+            # Shaped floor: FORMAT_FLOOR_REWARD + small format-adherence bonus.
+            # Provides intra-group reward variance so GRPO can compute advantages.
+            rewards.append(FORMAT_FLOOR_REWARD + _shaped_format_bonus(completion))
             continue
 
         env = build_env()

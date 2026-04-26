@@ -81,10 +81,12 @@ def main() -> int:
     # num_generations must divide (batch_size * grad_accum * world_size).
     p.add_argument("--grpo-num-generations", type=int, default=2)
     p.add_argument("--grpo-prompts-per-task", type=int, default=20)
-    p.add_argument("--grpo-temperature", type=float, default=0.7,
-                   help="Lower=more focused (less garbage). Default GRPO=1.0 produces wild outputs.")
-    p.add_argument("--grpo-max-completion-length", type=int, default=400,
-                   help="Token budget per rollout. 200 was too tight for full JSON.")
+    p.add_argument("--grpo-temperature", type=float, default=0.3,
+                   help="Lower=more focused. 0.3 stays close to greedy SFT distribution.")
+    p.add_argument("--grpo-max-completion-length", type=int, default=300,
+                   help="Token budget per rollout. JSON typically <150 tokens.")
+    p.add_argument("--grpo-top-p", type=float, default=0.7,
+                   help="Nucleus sampling — lower keeps generations on-distribution.")
     p.add_argument("--skip-sft", action="store_true")
     p.add_argument("--skip-grpo", action="store_true")
     p.add_argument(
@@ -321,7 +323,7 @@ def main() -> int:
             max_prompt_length=args.max_seq_len - args.grpo_max_completion_length,
             max_completion_length=args.grpo_max_completion_length,
             temperature=args.grpo_temperature,
-            top_p=0.9,
+            top_p=args.grpo_top_p,
             learning_rate=1e-6,
             logging_steps=1,
             save_strategy="no",
