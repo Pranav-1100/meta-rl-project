@@ -15,7 +15,7 @@ dependencies = [
     "anthropic>=0.39",
     "openenv-core",
     "matplotlib>=3.9",
-    "huggingface-hub>=1.12.0",
+    "huggingface-hub>=0.24",
 ]
 
 [project.optional-dependencies]
