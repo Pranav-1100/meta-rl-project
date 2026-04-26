@@ -86,11 +86,11 @@ The `end_task` action accepts `confidence ∈ {low, medium, high}` (mapped to 0.
 
 | | URL |
 |---|---|
-| 🤗 Hugging Face Space (env) | `TBD — pushed via openenv push` |
+| 🤗 Hugging Face Space (env) | https://huggingface.co/spaces/pranav-1100/phonepilot |
 | 📓 Colab — SFT + GRPO training | `TBD` |
 | 🎬 YouTube (<2 min demo) | `TBD` |
 | 📝 HF blog post | `TBD` |
-| 💻 Code repo (this) | `TBD` |
+| 💻 Code repo (this) | https://github.com/Pranav-1100/meta-rl-project |
 | 📊 Training plots | `data/plots/` (staircase, honesty-vs-capability, capability dashboard) |
 
 ---
