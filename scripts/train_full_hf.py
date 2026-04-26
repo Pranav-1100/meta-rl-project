@@ -78,7 +78,10 @@ def main() -> int:
     p.add_argument("--sft-grad-accum", type=int, default=8)
     p.add_argument("--sft-lr", type=float, default=2e-5)
     p.add_argument("--max-grpo-steps", type=int, default=80)
-    p.add_argument("--grpo-num-generations", type=int, default=4)
+    # num_generations must divide (batch_size * grad_accum * world_size).
+    # With per_device_batch_size=1, gradient_accumulation_steps=2, world=1 → 2.
+    # So num_generations=2 works; 4 would require grad_accum=4.
+    p.add_argument("--grpo-num-generations", type=int, default=2)
     p.add_argument("--grpo-prompts-per-task", type=int, default=20)
     p.add_argument("--skip-sft", action="store_true")
     p.add_argument("--skip-grpo", action="store_true")
