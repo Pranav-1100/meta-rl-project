@@ -173,23 +173,26 @@ def main() -> int:
         if not traj_files:
             print(f"[sft] ERROR: no trajectory files found at {traj_dir}")
             sys.exit(1)
-        print(f"[sft] loading {len(traj_files)} trajectory files")
-        ds = load_dataset(
-            "json", data_files=[str(p) for p in traj_files], split="train"
-        )
-        print(f"[sft] {len(ds)} episodes total")
+        print(f"[sft] loading {len(traj_files)} trajectory files (manual JSON parse)")
+        # Manual load — `datasets.load_dataset("json", ...)` chokes on nullable
+        # cross-file fields like `end_claim` (bool|None). We only need `messages`.
+        all_msgs = []
+        for f in traj_files:
+            for line in open(f):
+                line = line.strip()
+                if not line:
+                    continue
+                ep = json.loads(line)
+                if "messages" in ep:
+                    all_msgs.append({"messages": ep["messages"]})
+        print(f"[sft] {len(all_msgs)} episodes loaded")
+        ds = Dataset.from_list(all_msgs)
 
         def to_chat_text(row):
             msgs = messages_for_template(tokenizer, row["messages"])
             return {"text": tokenizer.apply_chat_template(msgs, tokenize=False)}
 
-        train_ds = ds.map(
-            to_chat_text,
-            remove_columns=[c for c in ds.column_names if c != "messages"],
-        )
-        # Drop the messages column post-template since SFTTrainer wants only `text`.
-        if "messages" in train_ds.column_names:
-            train_ds = train_ds.remove_columns(["messages"])
+        train_ds = ds.map(to_chat_text, remove_columns=ds.column_names)
 
         sft_args = SFTConfig(
             output_dir="/tmp/sft-out",
