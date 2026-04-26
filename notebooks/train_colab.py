@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Clone the PhonePilot repo into the Colab working dir.
 # Replace with your actual repo URL before running.
-REPO_URL = os.environ.get("PHONEPILOT_REPO", "https://github.com/<you>/phonepilot")
+REPO_URL = os.environ.get("PHONEPILOT_REPO", "https://github.com/Pranav-1100/meta-rl-project.git")
 REPO_DIR = Path("/content/phonepilot")
 if not REPO_DIR.exists():
     subprocess.run(["git", "clone", REPO_URL, str(REPO_DIR)], check=True)

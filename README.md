@@ -82,16 +82,16 @@ The `end_task` action accepts `confidence ∈ {low, medium, high}` (mapped to 0.
 
 ## Submission links
 
-> Some links go live only after Day-2 training + deploy. Placeholders marked `TBD` are filled in as we push.
-
 | | URL |
 |---|---|
 | 🤗 Hugging Face Space (env) | https://huggingface.co/spaces/pranav-1100/phonepilot |
-| 📓 Colab — SFT + GRPO training | `TBD` |
-| 🎬 YouTube (<2 min demo) | `TBD` |
-| 📝 HF blog post | `TBD` |
 | 💻 Code repo (this) | https://github.com/Pranav-1100/meta-rl-project |
-| 📊 Training plots | `data/plots/` (staircase, honesty-vs-capability, capability dashboard) |
+| 📓 Training notebook (Colab-ready) | [`notebooks/train_colab.ipynb`](https://github.com/Pranav-1100/meta-rl-project/blob/master/notebooks/train_colab.ipynb) — open in Colab via *File → Open notebook → GitHub* |
+| 🧠 Trained adapters (Qwen 2.5 7B SFT + GRPO) | https://huggingface.co/pranav-1100/phonepilot-qwen7b |
+| 🧠 Trained adapters (Gemma 2 9B SFT) | https://huggingface.co/vinnykc08/phonepilot-gemma9b |
+| 📝 HF blog post | [`blog.md`](./blog.md) — to be published by Vivek |
+| 🎬 YouTube (<2 min demo) | optional — submission rules require blog *OR* video, not both |
+| 📊 Eval plots | [`data/plots/`](./data/plots/) — `staircase.png`, `honesty_vs_capability.png`, `calibration.png`, `capability_dashboard.png` |
 
 ---
 
